@@ -1,0 +1,60 @@
+{
+  "vehicle": {
+    "audi_a5": {
+      "length": 4.67,
+      "width": 1.86,
+      "wheelbase": 2.82,
+      "max_speed": 13.89,
+      "max_steering_angle_deg": 45.0,
+      "max_acceleration": 9.0,
+      "max_deceleration": -9.0
+    }
+  },
+  "parking_lot": {
+    "num_slots": 12,
+    "width": 15.0,
+    "depth": 12.0,
+    "slot_width": 2.5,
+    "slot_length": 5.0
+  },
+  "simulation": {
+    "dt": 0.05,
+    "max_episode_steps": 500,
+    "start_position_x_range": [1.0, 6.0],
+    "start_position_y_range": [1.0, 4.0],
+    "goal_position_tolerance": 0.30,
+    "goal_heading_tolerance_deg": 5.0
+  },
+  "visualization": {
+    "figure_width": 12,
+    "figure_height": 10,
+    "margin": 3.0,
+    "grid_alpha": 0.3,
+    "slot_alpha_goal": 0.3,
+    "slot_alpha_other": 0.15,
+    "vehicle_alpha": 0.7,
+    "trajectory_alpha": 0.3,
+    "arrow_length": 1.5,
+    "info_box_alpha": 0.5,
+    "vehicle_color": "red",
+    "vehicle_heading_color": "darkred",
+    "goal_color": "green",
+    "trajectory_color": "blue",
+    "slot_edge_color": "black",
+    "slot_color_goal": "green",
+    "slot_color_other": "gray"
+  },
+  "planner": {
+    "xy_resolution": 0.1,
+    "yaw_resolution_deg": 3.0,
+    "step_size": 0.5,
+    "integration_steps": 6,
+    "max_expansions": 50000,
+    "steer_count": 11
+  },
+  "path_smoothing": {
+    "min_spacing": 0.05,
+    "max_jump": 0.20,
+    "chaikin_passes": 2
+  }
+}
