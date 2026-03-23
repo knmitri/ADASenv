@@ -35,6 +35,9 @@ class AudiA5(Vehicle):
             steering_deg = vehicle_config.get('max_steering_angle_deg', 45.0)
             self.MAX_STEERING_ANGLE = np.deg2rad(steering_deg)
 
+        # Steering actuator model: wheel angle follows command with finite rate.
+        self.MAX_STEERING_RATE = np.deg2rad(vehicle_config.get('max_steering_rate_deg', 240.0))
+
         self.MAX_ACCELERATION = vehicle_config['max_acceleration']
         self.MAX_DECELERATION = vehicle_config['max_deceleration']
     
@@ -101,6 +104,12 @@ class AudiA5(Vehicle):
         # Clamp inputs to vehicle limits
         acceleration = np.clip(acceleration, self.MAX_DECELERATION, self.MAX_ACCELERATION)
         steering_angle = np.clip(steering_angle, -self.MAX_STEERING_ANGLE, self.MAX_STEERING_ANGLE)
+
+        # Steering can be commanded even at standstill (actuator state update).
+        steer_err = steering_angle - self.steering_angle
+        max_delta = self.MAX_STEERING_RATE * dt
+        self.steering_angle += float(np.clip(steer_err, -max_delta, max_delta))
+        self.steering_angle = float(np.clip(self.steering_angle, -self.MAX_STEERING_ANGLE, self.MAX_STEERING_ANGLE))
         
         # Update velocity (allow negative for reversing)
         self.vx += acceleration * dt
@@ -114,7 +123,7 @@ class AudiA5(Vehicle):
             
             # Heading update based on steering angle
             # For reversing, the steering direction should be flipped
-            steering_effect = np.tan(steering_angle) / self._WHEELBASE
+            steering_effect = np.tan(self.steering_angle) / self._WHEELBASE
             if self.vx < 0:  # Reversing
                 steering_effect = -steering_effect
             
@@ -213,14 +222,22 @@ class ParkingSimulation:
                     'width': slot.width + 0.3,
                     'length': slot.length + 0.3
                 })
-        elif self.parking_lot is not None:
-            for slot in self.parking_lot.get_all_slots():
-                obstacles.append({
-                    'x': slot.x,
-                    'y': slot.y,
-                    'width': slot.length,
-                    'length': slot.width
-                })
+
+        # Add hard boundary walls so the planner stays within map limits.
+        if self.scenario is not None:
+            lot_width = self.scenario.lot_width
+            lot_depth = self.scenario.lot_depth
+        else:
+            lot_width = self.parking_lot.width
+            lot_depth = self.parking_lot.depth
+
+        wall_t = 0.25
+        obstacles.extend([
+            {'x': lot_width * 0.5, 'y': -wall_t * 0.5, 'width': lot_width + 2 * wall_t, 'length': wall_t, 'boundary_wall': True},
+            {'x': lot_width * 0.5, 'y': lot_depth + wall_t * 0.5, 'width': lot_width + 2 * wall_t, 'length': wall_t, 'boundary_wall': True},
+            {'x': -wall_t * 0.5, 'y': lot_depth * 0.5, 'width': wall_t, 'length': lot_depth + 2 * wall_t, 'boundary_wall': True},
+            {'x': lot_width + wall_t * 0.5, 'y': lot_depth * 0.5, 'width': wall_t, 'length': lot_depth + 2 * wall_t, 'boundary_wall': True},
+        ])
         return obstacles
 
     def get_dynamic_obstacles(self) -> List[Dict[str, Any]]:
@@ -242,9 +259,10 @@ class ParkingSimulation:
         
         # Use scenario if available
         if self.scenario:
-            # Start from one of the lane centers
-            self.vehicle.x = np.random.uniform(2.0, 8.0)
-            self.vehicle.y = np.random.uniform(1.0, 3.0)
+            lane_spacing = self.scenario.lot_width / self.scenario.num_lanes
+            right_lane_center_x = lane_spacing * 1.5
+            self.vehicle.x = right_lane_center_x
+            self.vehicle.y = self.scenario.lot_depth * 0.5
         else:
             # Legacy mode
             x_range = start_config['start_position_x_range']
@@ -252,17 +270,13 @@ class ParkingSimulation:
             self.vehicle.x = np.random.uniform(x_range[0], x_range[1])
             self.vehicle.y = np.random.uniform(y_range[0], y_range[1])
         
-        # Random starting heading
-        self.vehicle.yaw = np.random.uniform(-np.pi/4, np.pi/4)  # Face forward-ish
-        self.vehicle.vx = 0.0
-
-        # Place ego vehicle between lanes in scenario mode
+        # Deterministic heading in scenario mode, random in legacy mode.
         if self.scenario:
-            lane_spacing = self.scenario.lot_width / self.scenario.num_lanes
-            left_lane_right_edge = lane_spacing/2 + self.scenario.lane_width / 2
-            right_lane_left_edge = lane_spacing*1.5 - self.scenario.lane_width / 2
-            self.vehicle.x = np.random.uniform(left_lane_right_edge + 0.2, right_lane_left_edge - 0.2)
-            self.vehicle.y = np.random.uniform(1.5, self.scenario.lot_depth - 1.5)
+            self.vehicle.yaw = np.pi / 2.0
+        else:
+            self.vehicle.yaw = np.random.uniform(-np.pi/4, np.pi/4)
+        self.vehicle.vx = 0.0
+        self.vehicle.steering_angle = 0.0
 
         # Set goal slot
         if goal_slot_index is None:
@@ -353,6 +367,22 @@ class ParkingSimulation:
         else:
             collision = False
 
+        # Hard wall check at map boundaries.
+        if self.scenario is not None:
+            lot_width = self.scenario.lot_width
+            lot_depth = self.scenario.lot_depth
+        else:
+            lot_width = self.parking_lot.width
+            lot_depth = self.parking_lot.depth
+
+        out_of_bounds = np.any(vehicle_corners[:, 0] < 0.0) or np.any(vehicle_corners[:, 0] > lot_width) or \
+                        np.any(vehicle_corners[:, 1] < 0.0) or np.any(vehicle_corners[:, 1] > lot_depth)
+        if out_of_bounds:
+            collision = True
+            self.vehicle.x = float(np.clip(self.vehicle.x, 0.1, lot_width - 0.1))
+            self.vehicle.y = float(np.clip(self.vehicle.y, 0.1, lot_depth - 0.1))
+            self.vehicle.vx = 0.0
+
         if collision:
             self.collision_occurred = True
 
@@ -398,6 +428,7 @@ class ParkingSimulation:
             'position': np.array([self.vehicle.x, self.vehicle.y], dtype=np.float32),
             'velocity': np.array([self.vehicle.vx], dtype=np.float32),
             'heading': np.float32(self.vehicle.yaw),
+            'steering_angle': np.float32(self.vehicle.steering_angle),
             'goal_position': np.array([self.goal_x, self.goal_y], dtype=np.float32),
             'goal_heading': np.float32(self.goal_heading),
         }

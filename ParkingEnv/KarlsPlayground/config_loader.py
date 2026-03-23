@@ -1,6 +1,7 @@
 """Configuration loader for KarlsPlayground parking simulation."""
 
 import json
+from functools import lru_cache
 import numpy as np
 from pathlib import Path
 from typing import Dict, Any
@@ -14,7 +15,7 @@ def load_config() -> Dict[str, Any]:
     """
     config_path = Path(__file__).parent / "config.json"
     
-    with open(config_path, 'r') as f:
+    with open(config_path, 'r', encoding='utf-8') as f:
         config = json.load(f)
     
     # Convert degree values to radians
@@ -31,17 +32,11 @@ def load_config() -> Dict[str, Any]:
     return config
 
 
-# Global config instance (lazy-loaded)
-_config = None
-
-
+@lru_cache(maxsize=1)
 def get_config() -> Dict[str, Any]:
     """Get global configuration instance (lazy-loaded).
     
     Returns:
         Dictionary with all configuration parameters
     """
-    global _config
-    if _config is None:
-        _config = load_config()
-    return _config
+    return load_config()

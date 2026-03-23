@@ -13,6 +13,7 @@ class Vehicle(ABC):
         self.y = 0.0           # Position Y (meters)
         self.yaw = 0.0         # Heading angle (radians)
         self.vx = 0.0          # Forward velocity (m/s)
+        self.steering_angle = 0.0  # Front wheel steering angle (radians)
     
     @property
     @abstractmethod

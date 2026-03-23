@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "karlsplayground"
+version = "1.0.0"
+description = "A realistic Audi A5 parking simulation environment"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+  { name = "Karl" }
+]
+dependencies = [
+  "numpy>=1.20.0",
+  "matplotlib>=3.4.0"
+]
+keywords = ["parking", "simulation", "vehicle-control", "autonomous-driving"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12"
+]
+
+[project.scripts]
+parking-demo = "KarlsPlayground.demo_runner:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["KarlsPlayground*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
+
+[tool.black]
+line-length = 100
+target-version = ["py310"]

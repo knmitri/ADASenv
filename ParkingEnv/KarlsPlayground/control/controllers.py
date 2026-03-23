@@ -2,7 +2,7 @@
 
 import logging
 import numpy as np
-from typing import List, Tuple, Dict, Any
+from typing import List, Tuple, Dict, Any, Optional
 from ..simulation.utils import normalize_angle
 
 
@@ -103,11 +103,13 @@ class AdvancedParkingController:
              x_bounds: Tuple[float, float],
              y_bounds: Tuple[float, float],
              static_obstacles: List[Dict[str, Any]],
-             start_direction: int = None,
+             start_direction: Optional[int] = None,
              start_heading: float = 0.0,
              goal_heading: float = 0.0,
-             vehicle_size: Tuple[float, float] = (4.67, 1.86)):
+             vehicle_size: Tuple[float, float] = (4.67, 1.86)) -> List[PathWaypoint]:
         self.goal = goal
+        self.tracker.wheelbase = max(2.2, vehicle_size[0] * 0.60)
+        self.tracker.max_steering = np.deg2rad(42.0)
 
         # Determine initial best start direction based on alignment
         if start_direction is None:
@@ -128,7 +130,16 @@ class AdvancedParkingController:
                 vehicle_size
             )
             dir_changes = sum(1 for i in range(1, len(candidate_path)) if candidate_path[i].direction != candidate_path[i-1].direction)
-            candidate_score = len(candidate_path) + 15 * dir_changes
+            if len(candidate_path) >= 2:
+                dx0 = candidate_path[1].x - candidate_path[0].x
+                dy0 = candidate_path[1].y - candidate_path[0].y
+                seg_heading = np.arctan2(dy0, dx0)
+                if candidate_path[0].direction < 0:
+                    seg_heading = (seg_heading + np.pi) % (2 * np.pi)
+                init_heading_err = abs(np.arctan2(np.sin(seg_heading - start_heading), np.cos(seg_heading - start_heading)))
+            else:
+                init_heading_err = np.pi
+            candidate_score = len(candidate_path) + 15 * dir_changes + 18.0 * init_heading_err
             candidates.append((candidate_score, dir_try, candidate_path))
 
         best_score, best_direction, best_path = min(candidates, key=lambda c: c[0])
@@ -137,8 +148,6 @@ class AdvancedParkingController:
         if best_direction != start_direction:
             logging.info(f"AdvancedParkingController selected direction {best_direction} over {start_direction} (score {best_score})")
 
-        self.tracker.set_path(self.path)
-        return self.path
         self.tracker.set_path(self.path)
         return self.path
 
@@ -153,7 +162,10 @@ class AdvancedParkingController:
                         goal_heading: float,
                         dynamic_obstacles: List[Dict[str, Any]] = None) -> Tuple[float, float]:
         current_direction = 1
-        if self.tracker.path and 0 <= self.tracker.current_index < len(self.tracker.path):
+        if hasattr(self.tracker, 'spline_path') and self.tracker.spline_path:
+            if 0 <= self.tracker.current_index < len(self.tracker.spline_path):
+                current_direction = int(self.tracker.spline_path[self.tracker.current_index][2])
+        elif self.tracker.path and 0 <= self.tracker.current_index < len(self.tracker.path):
             current_direction = self.tracker.path[self.tracker.current_index].direction
         return self.tracker.compute_control(state, goal_heading, current_direction, dynamic_obstacles)
 

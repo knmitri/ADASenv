@@ -3,7 +3,8 @@
 __version__ = "1.0.0"
 
 from .simulation import ParkingSimulation, AudiA5, Vehicle, ParkingLot, ParkingSlot
-from .control import SimpleParkingController
+from .control import SimpleParkingController, AdvancedParkingController
+from .demo_runner import run_demo
 from .visualization import SimulationVisualizer
 
 __all__ = [
@@ -13,5 +14,7 @@ __all__ = [
     "ParkingLot",
     "ParkingSlot",
     "SimpleParkingController",
+    "AdvancedParkingController",
+    "run_demo",
     "SimulationVisualizer",
 ]
