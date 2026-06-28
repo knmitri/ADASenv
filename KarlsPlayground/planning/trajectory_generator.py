@@ -1,4 +1,4 @@
-"""Shared path geometry helpers for planning and tracking."""
+"""Trajectory generation and path-sampling helpers."""
 
 from __future__ import annotations
 

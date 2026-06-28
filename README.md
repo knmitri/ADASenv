@@ -1,15 +1,31 @@
 # KarlsPlayground
 
-Realistic parking simulation focused on low-speed maneuvering with planning + control modules.
+Realistic parking simulation focused on low-speed maneuvering and parking motion-planner challenges.
 
 ## Project Layout
 
-- `KarlsPlayground/scenarios`: scenario data models and parking scenario factories
-- `KarlsPlayground/simulation`: vehicle model, environment, parking lot geometry, and simulation utilities
-- `KarlsPlayground/control`: controllers, path planner, and trajectory tracker
-- `KarlsPlayground/visualization`: matplotlib-based rendering
+- `KarlsPlayground/simulation`: vehicle model, environment, parking lot geometry, command limits, and scoring
+- `KarlsPlayground/simulation/scenarios`: scenario data models, parking scenario factories, and artifact I/O
+- `KarlsPlayground/simulation/visualization`: matplotlib-based simulator rendering
+- `KarlsPlayground/planning`: planner interface, baseline planner, path planning, trajectory generation, and tracking
 - `KarlsPlayground/demo_runner.py`: reusable demo workflow
-- `scripts`: manual diagnostics and plotting utilities
+- `scripts`: scenario generation and challenge runners
+
+## Planner Interface
+
+A parking planner is expected to plan from a scenario and then return simulator commands:
+
+```python
+command = planner.compute_motion_command(state, goal_heading, dynamic_obstacles=[])
+```
+
+The simulator accepts only:
+
+- longitudinal acceleration in `m/s^2`
+- front steering angle in `rad`
+
+`KarlsPlayground.simulation.SimulatorController` clamps those commands to vehicle limits before
+calling `ParkingSimulationEnvironment.step(acceleration, steering_angle)`.
 
 ## Quick Start
 
@@ -39,6 +55,27 @@ or using package entrypoint:
 ```bash
 parking-demo
 ```
+
+Run the six-slot parking challenge headlessly:
+
+```bash
+python scripts/run_parking_challenge.py
+```
+
+or using the package entrypoint:
+
+```bash
+parking-challenge
+```
+
+Use a custom planner without touching the simulator:
+
+```bash
+python scripts/run_parking_challenge.py --planner your_module:YourPlanner
+```
+
+The planner class should use the same constructor shape as `BaselineParkingPlanner`
+and implement the `KarlsPlayground.planning.ParkingPlanner` protocol.
 
 By default, the first scenario is stored at
 `artifacts/scenarios/single_side_empty_parking_lot.json`. This local

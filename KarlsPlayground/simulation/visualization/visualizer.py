@@ -3,8 +3,8 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from typing import Any, Dict, List, Tuple
-from ..simulation.utils import normalize_angle
-from ..config_loader import get_config
+from KarlsPlayground.config_loader import get_config
+from KarlsPlayground.simulation.utils import normalize_angle
 
 
 class SimulationVisualizer:
@@ -29,6 +29,7 @@ class SimulationVisualizer:
         trajectory: List[Tuple[float, float]],
         step_count: int,
         planned_path: List[Tuple[float, float]] = None,
+        goal_pose: Tuple[float, float, float] | None = None,
     ) -> None:
         """Render a single frame of the simulation.
         
@@ -76,7 +77,7 @@ class SimulationVisualizer:
 
         
         # Draw info text overlay
-        self._draw_info(vehicle, parking_lot.get_slot(goal_slot_index), step_count)
+        self._draw_info(vehicle, parking_lot.get_slot(goal_slot_index), step_count, goal_pose=goal_pose)
         
         # Set labels and title
         self.ax.set_xlabel('X (m)')
@@ -172,7 +173,13 @@ class SimulationVisualizer:
         self.ax.plot(pts[:, 0], pts[:, 1], color='cyan', linewidth=max(3, width*4), alpha=0.25, zorder=1)
 
     
-    def _draw_info(self, vehicle, goal_slot, step_count: int) -> None:
+    def _draw_info(
+        self,
+        vehicle,
+        goal_slot,
+        step_count: int,
+        goal_pose: Tuple[float, float, float] | None = None,
+    ) -> None:
         """Draw information text overlay and goal visualization.
         
         Args:
@@ -182,12 +189,16 @@ class SimulationVisualizer:
         """
         vis_config = self._visualization_config()
 
-        if isinstance(goal_slot, dict):
+        if goal_pose is not None:
+            goal_x, goal_y, goal_heading = goal_pose
+        elif isinstance(goal_slot, dict):
             goal_x = goal_slot.get('x', 0.0)
             goal_y = goal_slot.get('y', 0.0)
             goal_heading = goal_slot.get('heading', 0.0)
-        elif hasattr(goal_slot, 'get_goal_pose'):
-            goal_x, goal_y, goal_heading = goal_slot.get_goal_pose()
+        elif all(hasattr(goal_slot, attr) for attr in ("x", "y", "heading")):
+            goal_x = goal_slot.x
+            goal_y = goal_slot.y
+            goal_heading = goal_slot.heading
         else:
             goal_x, goal_y, goal_heading = 0.0, 0.0, 0.0
 

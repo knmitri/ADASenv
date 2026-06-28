@@ -1,4 +1,4 @@
-"""Reusable controller test harness and synthetic paths."""
+"""Reusable trajectory-tracker test harness and synthetic paths."""
 
 from __future__ import annotations
 
@@ -6,13 +6,13 @@ from typing import Any
 
 import numpy as np
 
-from KarlsPlayground.control.path_planner import PathWaypoint
-from KarlsPlayground.control.trajectory_planner import TrajectoryTracker
+from KarlsPlayground.planning import PathWaypoint
+from KarlsPlayground.planning import TrajectoryTracker
 from KarlsPlayground.simulation.vehicle import AudiA5
 
 
 class ControllerTestEnv:
-    """Test harness for trajectory tracking controller."""
+    """Test harness for trajectory tracking."""
 
     def __init__(self, dt: float = 0.05):
         self.dt = dt

@@ -1,11 +1,11 @@
 import numpy as np
 
-from KarlsPlayground.control.path_planner import MotionPlanner, PathWaypoint
+from KarlsPlayground.planning import PathPlanner, PathWaypoint
 from KarlsPlayground.simulation.vehicle import AudiA5
 
 
-def _planner() -> MotionPlanner:
-    return MotionPlanner(
+def _planner() -> PathPlanner:
+    return PathPlanner(
         vehicle=AudiA5(),
         resolution=0.25,
         x_bounds=(0.0, 22.0),

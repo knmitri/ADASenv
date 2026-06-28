@@ -1,16 +1,19 @@
-"""Parking control strategies and controllers."""
+"""Baseline parking planner for the challenge harness."""
 
 import logging
 import numpy as np
 from typing import List, Tuple, Dict, Any, Optional
 
+from KarlsPlayground.simulation.commands import MotionCommand
 from KarlsPlayground.simulation.vehicle import Vehicle
-from .path_planner import MotionPlanner, PathWaypoint
-from .trajectory_planner import TrajectoryTracker
+
+from .parking_maneuver_planner import ParkingManeuverPlanner
+from .path_planner import PathPlanner, PathWaypoint
+from .trajectory_tracker import TrajectoryTracker
 
 
-class ParkingController:
-    """High level controller that uses path and trajectory planning with obstacle avoidance."""
+class BaselineParkingPlanner:
+    """Reference planner that returns acceleration and steering commands."""
 
     def __init__(self,
                 planner_resolution: float,
@@ -19,12 +22,22 @@ class ParkingController:
                 two_stage_parking: bool, 
                 vehicle: Vehicle,
                 x_bounds: Tuple[float, float],
-                y_bounds: Tuple[float, float]):  
+                y_bounds: Tuple[float, float],
+                max_expansions: int = 2000,
+                steer_count: int = 9):  
         
         self.x_bounds = x_bounds
         self.y_bounds = y_bounds    
 
-        self.motion_planner = MotionPlanner(vehicle=vehicle, resolution=planner_resolution, x_bounds=x_bounds, y_bounds=y_bounds)
+        self.motion_planner = PathPlanner(
+            vehicle=vehicle,
+            resolution=planner_resolution,
+            x_bounds=x_bounds,
+            y_bounds=y_bounds,
+            max_expansions=max_expansions,
+            steer_counts=(steer_count,),
+        )
+        self.parking_maneuver_planner = ParkingManeuverPlanner(vehicle)
         self.tracker = TrajectoryTracker(max_speed=max_speed, max_reverse_speed=max_reverse_speed)
         self.vehicle = vehicle
         self.path: List[PathWaypoint] = []
@@ -66,6 +79,23 @@ class ParkingController:
         
         return path
 
+    def _create_forward_approach_path(
+        self,
+        start: Tuple[float, float],
+        start_heading: float,
+        staging_point: Tuple[float, float],
+        goal_heading: float,
+    ) -> List[PathWaypoint]:
+        """Create a connected forward approach when search cannot find one."""
+
+        mid_x = float(np.clip((start[0] + staging_point[0]) * 0.5, self.x_bounds[0], self.x_bounds[1]))
+        mid_y = float(np.clip((start[1] + staging_point[1]) * 0.5, self.y_bounds[0], self.y_bounds[1]))
+        return [
+            PathWaypoint(float(start[0]), float(start[1]), 1, float(start_heading)),
+            PathWaypoint(mid_x, mid_y, 1, float(goal_heading)),
+            PathWaypoint(float(staging_point[0]), float(staging_point[1]), 1, float(goal_heading)),
+        ]
+
     def plan(self,
             start: Tuple[float, float],
             start_heading: float,
@@ -74,14 +104,21 @@ class ParkingController:
             start_direction: Optional[int] = None
              ) -> List[PathWaypoint]:
         
-        # Store vehicle dimensions for staging point calculation
-        vehicle_size = (self.vehicle.length, self.vehicle.width)
-        
         self.tracker.wheelbase = self.vehicle.wheelbase
         self.tracker.max_steering = self.vehicle.MAX_STEERING_ANGLE
-        
+
         # **TWO-STAGE PARKING LOGIC**
         if self.two_stage_parking:
+            maneuver = self.parking_maneuver_planner.plan_perpendicular(
+                start=start,
+                start_heading=start_heading,
+                goal=goal,
+                y_bounds=self.y_bounds,
+            )
+            self.path = maneuver.as_path()
+            self.tracker.set_path(self.path)
+            return self.path
+
             # Calculate staging point (adjacent to parking slot)
             self.staging_point = self._calculate_staging_point(goal)
             self.stage = 1
@@ -131,7 +168,14 @@ class ParkingController:
                 candidates.append((candidate_score, dir_try, candidate_path))
 
             if not candidates:
-                self.path = self._create_reverse_path(staging_point_clamped, goal)
+                approach_path = self._create_forward_approach_path(
+                    start,
+                    start_heading,
+                    staging_point_clamped,
+                    goal[2],
+                )
+                reverse_path = self._create_reverse_path(staging_point_clamped, goal)
+                self.path = approach_path + reverse_path
                 self.tracker.set_path(self.path)
                 return self.path
 
@@ -140,13 +184,12 @@ class ParkingController:
             approach_forward_count = sum(1 for p in approach_path if p.direction > 0)
             if approach_forward_count < 2 or approach_path[-1].direction < 0:
                 logging.info("Stage 1 fallback: synthesizing forward-only approach to staging point")
-                mx = float(np.clip((start[0] + staging_point_clamped[0]) * 0.5, self.x_bounds[0], self.x_bounds[1]))
-                my = float(np.clip((start[1] + staging_point_clamped[1]) * 0.5, self.y_bounds[0], self.y_bounds[1]))
-                approach_path = [
-                    PathWaypoint(float(start[0]), float(start[1]), 1, float(start_heading)),
-                    PathWaypoint(mx, my, 1, float(goal[2])),
-                    PathWaypoint(float(staging_point_clamped[0]), float(staging_point_clamped[1]), 1, float(goal[2])),
-                ]
+                approach_path = self._create_forward_approach_path(
+                    start,
+                    start_heading,
+                    staging_point_clamped,
+                    goal[2],
+                )
                 best_direction = 1
             
             # Stage 2: Create simple reverse path from staging point to goal
@@ -170,7 +213,7 @@ class ParkingController:
                     self.path = approach_path + reverse_path
             
             if best_direction != start_direction:
-                logging.info(f"ParkingController selected direction {best_direction} over {start_direction} (approach score {best_score})")
+                logging.info(f"Baseline planner selected direction {best_direction} over {start_direction} (approach score {best_score})")
             
             self.tracker.set_path(self.path)
             return self.path
@@ -215,7 +258,7 @@ class ParkingController:
         self.path = best_path
 
         if best_direction != start_direction:
-            logging.info(f"ParkingController selected direction {best_direction} over {start_direction} (score {best_score})")
+            logging.info(f"Baseline planner selected direction {best_direction} over {start_direction} (score {best_score})")
 
         self.tracker.set_path(self.path)
         return self.path
@@ -228,10 +271,29 @@ class ParkingController:
                         state: Dict[str, Any],
                         goal_heading: float,
                         dynamic_obstacles: List[Dict[str, Any]] = None) -> Tuple[float, float]:
+        command = self.compute_motion_command(state, goal_heading, dynamic_obstacles)
+        return (
+            command.longitudinal_acceleration_mps2,
+            command.front_mid_axle_steering_angle_rad,
+        )
+
+    def compute_motion_command(self,
+                               state: Dict[str, Any],
+                               goal_heading: float,
+                               dynamic_obstacles: List[Dict[str, Any]] = None) -> MotionCommand:
         current_direction = 1
         if hasattr(self.tracker, 'spline_path') and self.tracker.spline_path:
             if 0 <= self.tracker.current_index < len(self.tracker.spline_path):
                 current_direction = int(self.tracker.spline_path[self.tracker.current_index][2])
         elif self.tracker.path and 0 <= self.tracker.current_index < len(self.tracker.path):
             current_direction = self.tracker.path[self.tracker.current_index].direction
-        return self.tracker.compute_control(state, goal_heading, current_direction, dynamic_obstacles)
+        acceleration, steering = self.tracker.compute_control(
+            state,
+            goal_heading,
+            current_direction,
+            dynamic_obstacles,
+        )
+        return MotionCommand(
+            longitudinal_acceleration_mps2=acceleration,
+            front_mid_axle_steering_angle_rad=steering,
+        )

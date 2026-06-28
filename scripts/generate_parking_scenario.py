@@ -4,16 +4,14 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-import sys
 
+from _project import PROJECT_ROOT, add_project_root_to_path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUTPUT = PROJECT_ROOT / "artifacts" / "scenarios" / "single_side_empty_parking_lot.json"
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+add_project_root_to_path()
 
 from KarlsPlayground.config_loader import get_config
-from KarlsPlayground.scenarios import ParkingScenarioFactory, save_scenario
+from KarlsPlayground.simulation.scenarios import ParkingScenarioFactory, save_scenario
 
 
 def parse_args() -> argparse.Namespace:

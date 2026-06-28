@@ -1,7 +1,7 @@
 import numpy as np
 
-from KarlsPlayground.control.path_planner import PathWaypoint
-from KarlsPlayground.control.trajectory_planner import TrajectoryTracker
+from KarlsPlayground.planning import PathWaypoint
+from KarlsPlayground.planning import TrajectoryTracker
 
 
 def _state(x: float, y: float, yaw: float, vx: float = 0.5) -> dict:

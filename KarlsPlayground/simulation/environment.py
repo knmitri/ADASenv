@@ -7,14 +7,14 @@ Units: SI (meters, seconds, radians)
 
 import numpy as np
 from typing import Tuple, Dict, Any, List
-from KarlsPlayground.scenarios import ParkingScenario, ParkingScenarioFactory
+from KarlsPlayground.simulation.scenarios import ParkingScenario, ParkingScenarioFactory
 from .vehicle import Vehicle
 from .utils import normalize_angle
 
 class ParkingSimulationEnvironment:
     """Realistic parking simulation environment.
     
-    This is a custom simulation environment for testing parking controllers.
+    This is a custom simulation environment for testing parking planners.
     Input: acceleration (m/s²) and steering angle (radians)
     Output: vehicle state (position, velocity, heading)
     """
@@ -110,6 +110,25 @@ class ParkingSimulationEnvironment:
         """Return current dynamic obstacles (empty in static scenario)."""
         # extend with moving objects in future; for now no dynamic obstacles.
         return []
+
+    def get_goal_pose(self) -> Tuple[float, float, float]:
+        """Return the rear-axle pose that centers the vehicle footprint in the goal slot."""
+
+        if self.goal_slot is None:
+            goal_slot = self.scenario.goal_slot
+        else:
+            goal_slot = self.goal_slot
+
+        front_overhang = float(getattr(self.vehicle, "_FRONT_OVERHANG", 0.0))
+        rear_overhang = float(getattr(self.vehicle, "_REAR_OVERHANG", 0.0))
+        front_extent = float(self.vehicle.wheelbase + front_overhang)
+        rear_extent = rear_overhang
+        rear_axle_offset_from_center = 0.5 * (front_extent - rear_extent)
+
+        heading = float(goal_slot.heading)
+        x = float(goal_slot.x - rear_axle_offset_from_center * np.cos(heading))
+        y = float(goal_slot.y - rear_axle_offset_from_center * np.sin(heading))
+        return x, y, heading
     
     def spawn_ego_vehicle(self) -> None:
         """Spawn the ego vehicle."""
@@ -172,8 +191,9 @@ class ParkingSimulationEnvironment:
         self.trajectory.append((self.vehicle.x, self.vehicle.y))
         
         # Check if goal is reached
-        pos_error = np.sqrt((self.vehicle.x - self.goal_slot.x)**2 + (self.vehicle.y - self.goal_slot.y)**2)
-        heading_error = normalize_angle(self.vehicle.yaw - self.goal_slot.heading)
+        goal_x, goal_y, goal_heading = self.get_goal_pose()
+        pos_error = np.sqrt((self.vehicle.x - goal_x)**2 + (self.vehicle.y - goal_y)**2)
+        heading_error = normalize_angle(self.vehicle.yaw - goal_heading)
         
         # Check if whole vehicle is inside the slot
         x_min = self.goal_slot.x - self.goal_slot.length / 2
@@ -255,7 +275,7 @@ class ParkingSimulationEnvironment:
         
         # Lazy-load visualizer on first render
         if self.visualizer is None:
-            from ..visualization import SimulationVisualizer
+            from .visualization import SimulationVisualizer
             self.visualizer = SimulationVisualizer(self.config.get("visualization"))
         
         # Render current frame
@@ -266,6 +286,7 @@ class ParkingSimulationEnvironment:
             trajectory=self.trajectory,
             step_count=self.step_count,
             planned_path=self.planned_path,
+            goal_pose=self.get_goal_pose(),
         )
     
 

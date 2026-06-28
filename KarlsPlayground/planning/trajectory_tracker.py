@@ -2,8 +2,9 @@
 
 import numpy as np
 from typing import List, Tuple, Dict, Any
-from .path_planner import PathWaypoint
-from .path_utils import build_tracking_samples
+from KarlsPlayground.planning.path_planner import PathWaypoint
+from KarlsPlayground.planning.trajectory_generator import build_tracking_samples
+from KarlsPlayground.simulation.kinematics import kinematic_bicycle_step
 
 
 class TrajectoryTracker:
@@ -55,11 +56,8 @@ class TrajectoryTracker:
         nx, ny, nyaw, nvx = x, y, yaw, vx
         for _ in range(steps):
             nvx = float(np.clip(nvx + acceleration * dt, -self.max_reverse_speed, self.max_speed))
-            nx += nvx * dt * np.cos(nyaw)
-            ny += nvx * dt * np.sin(nyaw)
-            if abs(nvx) > 1e-5:
-                nyaw += nvx * dt * np.tan(steer) / max(self.wheelbase, 1e-3)
-                nyaw = float(np.arctan2(np.sin(nyaw), np.cos(nyaw)))
+            state = kinematic_bicycle_step(nx, ny, nyaw, nvx, steer, dt, self.wheelbase)
+            nx, ny, nyaw = state.x, state.y, state.yaw
         return nx, ny, nyaw, nvx
 
     def _predictive_control(self,
@@ -202,7 +200,7 @@ class TrajectoryTracker:
         if self.active_direction > 0 and next_switch >= 0:
             sx, sy = self.spline_path[next_switch][0], self.spline_path[next_switch][1]
             seam_dist = np.hypot(sx - x, sy - y)
-            if seam_dist < max(1.6, lookahead * 1.4) or self.current_index >= max(0, next_switch - 1):
+            if seam_dist < 0.35 or self.current_index >= max(0, next_switch - 1):
                 self.current_index = next_switch
                 self.active_direction = int(self.spline_path[next_switch][2])
                 return sx, sy, self.active_direction
@@ -213,7 +211,7 @@ class TrajectoryTracker:
             cur_dir = self.spline_path[j][2]
             if cur_dir != prev_dir:
                 sx, sy = self.spline_path[j][0], self.spline_path[j][1]
-                if np.hypot(sx - x, sy - y) < 1.2:
+                if np.hypot(sx - x, sy - y) < 0.35:
                     self.current_index = j
                     self.active_direction = int(cur_dir)
                     return sx, sy, cur_dir
@@ -402,8 +400,17 @@ class TrajectoryTracker:
         if self.current_index >= max(0, spline_len - 4):
             target_speed *= 0.4
 
-        # Terminal hold: stop driving once close enough to final pose region.
-        if final_goal_dist < 0.9:
+        next_switch = self._next_direction_switch_index(self.current_index)
+        if self.active_direction > 0 and next_switch >= 0:
+            sx, sy = self.spline_path[next_switch][0], self.spline_path[next_switch][1]
+            seam_dist = float(np.hypot(sx - x, sy - y))
+            if seam_dist < 3.0:
+                target_speed = min(target_speed, 0.45)
+            if seam_dist < 0.8:
+                target_speed = min(target_speed, 0.18)
+
+        # Terminal hold only when the final rear-axle pose and heading are both settled.
+        if final_goal_dist < 0.25 and abs(self._angle_diff(goal_heading, yaw)) < 0.18:
             target_speed = 0.0
 
         # Stuck detection: no progress toward goal
@@ -436,6 +443,8 @@ class TrajectoryTracker:
 
         # Stability-first tracking: use geometric steering and speed PID directly.
         steering = float(stanley_steer)
+        if target_direction < 0:
+            steering = -steering
         steering = float(np.clip(steering, -self.max_steering, self.max_steering))
 
         steer_limit = self._steering_limit_from_speed(abs(vx), yaw_rate_limit=0.35)
@@ -443,9 +452,36 @@ class TrajectoryTracker:
 
         acceleration = float(np.clip(baseline_acceleration, -2.8, 2.8))
 
+        final_heading_error = self._angle_diff(goal_heading, yaw)
+        if final_goal_dist < 0.8:
+            goal_axis_x = float(np.cos(goal_heading))
+            goal_axis_y = float(np.sin(goal_heading))
+            longitudinal_error = (x - final_x) * goal_axis_x + (y - final_y) * goal_axis_y
+            lateral_error = -(x - final_x) * goal_axis_y + (y - final_y) * goal_axis_x
+            desired_final_speed = float(np.clip(-0.7 * longitudinal_error, -0.25, 0.25))
+            lateral_velocity_gain = np.sin(yaw - goal_heading)
+            if abs(lateral_error) > 0.08 and abs(lateral_velocity_gain) > 0.03:
+                lateral_speed = np.sign(-lateral_error * lateral_velocity_gain) * 0.16
+                desired_final_speed = float(lateral_speed)
+            if abs(final_heading_error) > 0.18:
+                desired_final_speed = 0.14
+            if abs(longitudinal_error) < 0.08 and abs(final_heading_error) < 0.18:
+                desired_final_speed = 0.0
+
+            acceleration = float(np.clip(kp_speed * (desired_final_speed - vx), -1.2, 1.2))
+            final_steering = 1.6 * final_heading_error + np.arctan2(1.2 * lateral_error, abs(vx) + 0.25)
+            if desired_final_speed < 0.0:
+                final_steering = -final_steering
+            if abs(final_heading_error) > 0.04 or abs(lateral_error) > 0.04:
+                steering = float(np.clip(final_steering, -0.35, 0.35))
+            else:
+                steering = 0.0
+
         # If nearly stopped but significantly misaligned, keep steering active and creep.
         if abs(vx) < 0.04 and abs(heading_error) > 0.35:
             steer_sign = 1.0 if heading_error >= 0 else -1.0
+            if target_direction < 0:
+                steer_sign = -steer_sign
             steering = float(np.clip(0.8 * current_steer + 0.2 * steer_sign * self.max_steering,
                                      -self.max_steering,
                                      self.max_steering))

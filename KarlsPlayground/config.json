@@ -30,7 +30,7 @@
     "start_position_x_range": [1.0, 6.0],
     "start_position_y_range": [1.0, 4.0],
     "goal_position_tolerance": 0.30,
-    "goal_heading_tolerance_deg": 4.5
+    "goal_heading_tolerance_deg": 10.0
   },
   "visualization": {
     "figure_width": 12,

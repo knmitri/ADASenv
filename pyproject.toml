@@ -30,6 +30,7 @@ classifiers = [
 
 [project.scripts]
 parking-demo = "KarlsPlayground.demo_runner:main"
+parking-challenge = "KarlsPlayground.challenge_runner:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

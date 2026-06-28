@@ -4,17 +4,15 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-import sys
 from typing import Any
 
 import matplotlib.pyplot as plt
 import numpy as np
 
+from _project import PROJECT_ROOT, add_project_root_to_path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUTPUT = PROJECT_ROOT / "artifacts" / "s_curve_comparison.png"
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+add_project_root_to_path()
 
 from KarlsPlayground.testing import ControllerTestEnv
 

@@ -1,7 +1,7 @@
 import numpy as np
 from abc import ABC, abstractmethod
 
-from .utils import normalize_angle  
+from .kinematics import VehicleGeometry, kinematic_bicycle_step
 
 class Vehicle(ABC):
     """Abstract base class for vehicle models."""
@@ -102,22 +102,7 @@ class AudiA5(Vehicle):
         Returns:
             Array of shape (4, 2) with corner positions [x, y]
         """
-        rear_overhang = self._REAR_OVERHANG
-        front_overhang = self._FRONT_OVERHANG
-        # Corners in local frame (relative to rear axle)
-        corners_local = np.array([
-            [-rear_overhang, -self._WIDTH/2],  # Rear left
-            [-rear_overhang, self._WIDTH/2],   # Rear right
-            [self._WHEELBASE + front_overhang, -self._WIDTH/2],  # Front left
-            [self._WHEELBASE + front_overhang, self._WIDTH/2],   # Front right
-        ])
-        # Rotation matrix for yaw
-        cos_y = np.cos(self.yaw)
-        sin_y = np.sin(self.yaw)
-        rot = np.array([[cos_y, -sin_y], [sin_y, cos_y]])
-        # Transform to global frame
-        corners_global = np.dot(corners_local, rot.T) + np.array([self.x, self.y])
-        return corners_global
+        return VehicleGeometry.from_vehicle(self).corners(self.x, self.y, self.yaw)
     
     def update(self, acceleration: float, steering_angle: float, dt: float) -> None:
         """Update vehicle state using kinematic bicycle model.
@@ -141,17 +126,15 @@ class AudiA5(Vehicle):
         self.vx += acceleration * dt
         self.vx = np.clip(self.vx, -self.MAX_SPEED, self.MAX_SPEED)
         
-        # Kinematic bicycle model
-        if abs(self.vx) > 1e-6:
-            # Position update
-            self.x += self.vx * dt * np.cos(self.yaw)
-            self.y += self.vx * dt * np.sin(self.yaw)
-            
-            # Heading update based on steering angle
-            # For reversing, the steering direction should be flipped
-            steering_effect = np.tan(self.steering_angle) / self._WHEELBASE
-            if self.vx < 0:  # Reversing
-                steering_effect = -steering_effect
-            
-            self.yaw += self.vx * dt * steering_effect
-            self.yaw = normalize_angle(self.yaw)
+        next_state = kinematic_bicycle_step(
+            self.x,
+            self.y,
+            self.yaw,
+            self.vx,
+            self.steering_angle,
+            dt,
+            self._WHEELBASE,
+        )
+        self.x = next_state.x
+        self.y = next_state.y
+        self.yaw = next_state.yaw

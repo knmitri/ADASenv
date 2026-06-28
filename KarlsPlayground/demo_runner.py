@@ -1,6 +1,6 @@
 """
-Reusable demo runner for parking controller experiments.
-This script sets up and runs a series of parking controller demo episodes,
+Reusable demo runner for parking planner experiments.
+This script sets up and runs a series of parking planner demo episodes,
 logging results and printing summary statistics for each run.
 """
 
@@ -15,22 +15,22 @@ from typing import Any, Dict, List
 import numpy as np
 
 
-# Import controller and simulation classes, supporting both package and script execution modes
+# Import planner and simulation classes, supporting both package and script execution modes
 try:
     # Package mode: python -m KarlsPlayground.demo_runner
     from .config_loader import get_config
-    from .control import ParkingController
-    from .scenarios import load_parking_scenario
-    from .simulation import AudiA5, ParkingSimulationEnvironment
+    from .planning import BaselineParkingPlanner
+    from .simulation.scenarios import load_parking_scenario
+    from .simulation import AudiA5, ParkingSimulationEnvironment, SimulatorController
 except ImportError:
     # Script mode: python KarlsPlayground/demo_runner.py
     workspace_root = Path(__file__).resolve().parent.parent
     if str(workspace_root) not in sys.path:
         sys.path.insert(0, str(workspace_root))
     from KarlsPlayground.config_loader import get_config
-    from KarlsPlayground.control import ParkingController
-    from KarlsPlayground.scenarios import load_parking_scenario
-    from KarlsPlayground.simulation import ParkingSimulationEnvironment, AudiA5
+    from KarlsPlayground.planning import BaselineParkingPlanner
+    from KarlsPlayground.simulation.scenarios import load_parking_scenario
+    from KarlsPlayground.simulation import ParkingSimulationEnvironment, AudiA5, SimulatorController
 
 LOGGER = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -47,8 +47,8 @@ def _setup_logging() -> None:
 
 def run_demo(config, scenario_artifact: Path = DEFAULT_SCENARIO_ARTIFACT) -> List[float]:
     """
-    Run controller demo episodes and return per-episode scores.
-    Sets up the simulation, controller, and runs multiple episodes, printing and logging results.
+    Run planner demo episodes and return per-episode scores.
+    Sets up the simulation, planner, and runs multiple episodes, printing and logging results.
     """
     _setup_logging()
     scores: List[float] = []
@@ -72,19 +72,22 @@ def run_demo(config, scenario_artifact: Path = DEFAULT_SCENARIO_ARTIFACT) -> Lis
     vehicle = AudiA5()
     sim = ParkingSimulationEnvironment(vehicle=vehicle, config=config, scenario=scenario)
     
-    x_bounds = (0.0, sim.scenario.lot.lot_width)
-    y_bounds = (0.0, sim.scenario.lot.lot_length) 
+    x_bounds = (sim.world_min_x, sim.scenario.lot.lot_width)
+    y_bounds = (sim.world_min_y, sim.scenario.lot.lot_length) 
 
-    # Create the parking controller
-    controller = ParkingController(
+    # Create the reference parking planner
+    planner = BaselineParkingPlanner(
         planner_resolution=config['planner']['xy_resolution'],
         max_speed=config['planner']['max_speed'],
         max_reverse_speed=config['planner']['max_reverse_speed'],
         two_stage_parking=config['planner']['two_stage_parking'],
         vehicle=vehicle,
         x_bounds=x_bounds,
-        y_bounds=y_bounds
+        y_bounds=y_bounds,
+        max_expansions=config['planner'].get('max_expansions', 2000),
+        steer_count=config['planner'].get('steer_count', 9),
     )
+    simulator_controller = SimulatorController.from_vehicle(vehicle)
     
     goal_slots = [scenario.goal_slot_index]
     for episode, goal_slot_index in enumerate(goal_slots, start=1):
@@ -99,16 +102,12 @@ def run_demo(config, scenario_artifact: Path = DEFAULT_SCENARIO_ARTIFACT) -> Lis
 
         total_steps = 0
         # Get goal and bounds for planning
-        goal_xyh = (
-            float(goal_slot.x),
-            float(goal_slot.y),
-            float(goal_slot.heading)
-        )
+        goal_xyh = sim.get_goal_pose()
 
         static_obstacles: List[Dict[str, Any]] = sim.get_static_obstacles()
 
         # Plan path to goal slot
-        path = controller.plan(
+        path = planner.plan(
             tuple(state["position"]),
             start_heading=float(state["heading"]),
             goal=goal_xyh,
@@ -135,17 +134,19 @@ def run_demo(config, scenario_artifact: Path = DEFAULT_SCENARIO_ARTIFACT) -> Lis
 
         # Step through the episode until done
         while True:
-            acceleration, steering_angle = controller.compute_control(
+            requested_command = planner.compute_motion_command(
                 state,
                 goal_heading=goal_xyh[2],
                 dynamic_obstacles=[],
             )
+            actuator_command = simulator_controller.apply_limits(requested_command)
+            acceleration, steering_angle = actuator_command.as_step_args()
 
             # Print status every 50 steps
             if total_steps % 50 == 0:
                 print(
-                    f"    Step {total_steps}: accel={acceleration:.2f}, "
-                    f"steer={steering_angle:.2f}, vel={state['velocity'][0]:.2f}"
+                    f"    Step {total_steps}: long_accel={acceleration:.2f}, "
+                    f"front_mid_steer={steering_angle:.2f}, vel={state['velocity'][0]:.2f}"
                 )
 
             state, info = sim.step(

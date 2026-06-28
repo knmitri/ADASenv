@@ -2,10 +2,10 @@
 
 __version__ = "1.0.0"
 
-from .control import ParkingController
-from .scenarios import ParkingScenario, ParkingScenarioFactory, ScenarioObject
+from .planning import BaselineParkingPlanner
 from .simulation import AudiA5, ParkingLot, ParkingSimulationEnvironment, ParkingSlot, Vehicle
-from .visualization import SimulationVisualizer
+from .simulation.scenarios import ParkingScenario, ParkingScenarioFactory, ScenarioObject
+from .simulation.visualization import SimulationVisualizer
 
 __all__ = [
     "ParkingSimulationEnvironment",
@@ -13,7 +13,7 @@ __all__ = [
     "Vehicle",
     "ParkingLot",
     "ParkingSlot",
-    "ParkingController",
+    "BaselineParkingPlanner",
     "ParkingScenario",
     "ParkingScenarioFactory",
     "ScenarioObject",

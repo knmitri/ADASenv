@@ -4,7 +4,12 @@ import heapq
 import logging
 import numpy as np
 from typing import List, Tuple, Dict, Any, NamedTuple
-from .path_utils import catmull_rom_point
+from KarlsPlayground.simulation.kinematics import (
+    VehicleGeometry,
+    kinematic_bicycle_arc_step,
+    polygon_intersects_aabb,
+)
+from .trajectory_generator import catmull_rom_point
 
 logger = logging.getLogger(__name__)
 
@@ -15,17 +20,30 @@ class PathWaypoint(NamedTuple):
     direction: int  # 1 for forward, -1 for reverse
     heading: float = 0.0
 
-class MotionPlanner:
-    """Simple 2D grid-based A* planner with obstacle avoidance and direction changes."""
+class PathPlanner:
+    """Hybrid-A*-style bicycle-model path planner for parking maneuvers."""
 
-    def __init__(self, vehicle, resolution: float = 0.25, x_bounds: Tuple[float, float] = None, y_bounds: Tuple[float, float] = None):
+    def __init__(
+        self,
+        vehicle,
+        resolution: float = 0.25,
+        x_bounds: Tuple[float, float] = None,
+        y_bounds: Tuple[float, float] = None,
+        max_expansions: int = 2000,
+        steer_counts: Tuple[int, ...] = (7, 9),
+    ):
         self.vehicle = vehicle
         self.resolution = resolution
         self.x_bounds = x_bounds
         self.y_bounds = y_bounds
+        self.max_expansions = int(max_expansions)
+        self.steer_counts = tuple(int(c) for c in steer_counts if int(c) >= 3) or (9,)
+        self.geometry = VehicleGeometry.from_vehicle(vehicle)
 
     def _clamp_point(self,
                      point: Tuple[float, float]) -> Tuple[float, float]:
+        if self.x_bounds is None or self.y_bounds is None:
+            return float(point[0]), float(point[1])
         return (
             float(np.clip(point[0], self.x_bounds[0] + self.resolution, self.x_bounds[1] - self.resolution)),
             float(np.clip(point[1], self.y_bounds[0] + self.resolution, self.y_bounds[1] - self.resolution)),
@@ -50,17 +68,18 @@ class MotionPlanner:
             max_dev = max(max_dev, float(np.linalg.norm(p - proj)))
         return max_dev < 0.8
 
-    def _point_hits_obstacle(self,
-                             point: Tuple[float, float],
-                             obstacles: List[Dict[str, Any]],
-                             clearance: float) -> bool:
-        px, py = point
+    def _footprint_hits_obstacle(self,
+                                 pose: Tuple[float, float, float],
+                                 obstacles: List[Dict[str, Any]],
+                                 clearance: float) -> bool:
+        x, y, yaw = pose
+        footprint = self.geometry.corners(x, y, yaw)
         for obs in obstacles:
             ox = obs['x']
             oy = obs['y']
-            ow = obs.get('width', obs.get('length', 0.0))
-            oh = obs.get('length', obs.get('width', 0.0))
-            if abs(px - ox) <= (ow * 0.5 + clearance) and abs(py - oy) <= (oh * 0.5 + clearance):
+            ow = float(obs.get('width', obs.get('length', 0.0))) + 2.0 * clearance
+            oh = float(obs.get('length', obs.get('width', 0.0))) + 2.0 * clearance
+            if polygon_intersects_aabb(footprint, (ox, oy), (ow, oh)):
                 return True
         return False
 
@@ -69,9 +88,10 @@ class MotionPlanner:
                               obstacles: List[Dict[str, Any]]) -> bool:
         if not path:
             return False
-        clearance = max(0.15, self.vehicle.width * 0.25)
-        for wp in path:
-            if self._point_hits_obstacle((wp.x, wp.y), obstacles, clearance):
+        annotated = self._annotate_headings(path, start_heading=path[0].heading, goal_heading=path[-1].heading)
+        clearance = 0.05
+        for wp in annotated:
+            if self._footprint_hits_obstacle((wp.x, wp.y, wp.heading), obstacles, clearance):
                 return False
         return True
 
@@ -155,7 +175,8 @@ class MotionPlanner:
             return False
 
         first_seg_yaw = float(np.arctan2(v0[1], v0[0]))
-        first_err = abs(self._normalize_angle(first_seg_yaw - start_heading))
+        first_vehicle_yaw = first_seg_yaw if path[0].direction > 0 else first_seg_yaw + np.pi
+        first_err = abs(self._normalize_angle(first_vehicle_yaw - start_heading))
         if first_err > np.deg2rad(40.0):
             return False
 
@@ -435,6 +456,54 @@ class MotionPlanner:
                 shaped.append(candidate)
         return shaped
 
+    def _bezier_maneuver(
+        self,
+        start: Tuple[float, float],
+        goal: Tuple[float, float],
+        start_heading: float,
+        goal_heading: float,
+        direction: int,
+        obstacles: List[Dict[str, Any]],
+    ) -> List[PathWaypoint]:
+        """Generate a smooth single-direction maneuver and accept it only if feasible."""
+
+        p0 = np.array(start, dtype=float)
+        p3 = np.array(goal, dtype=float)
+        chord = float(np.linalg.norm(p3 - p0))
+        if chord < 1e-6:
+            return []
+
+        path_start_heading = start_heading if direction > 0 else start_heading + np.pi
+        path_goal_heading = goal_heading if direction > 0 else goal_heading + np.pi
+        t0 = np.array([np.cos(path_start_heading), np.sin(path_start_heading)], dtype=float)
+        t1 = np.array([np.cos(path_goal_heading), np.sin(path_goal_heading)], dtype=float)
+
+        for handle_scale in (0.35, 0.55, 0.8, 1.1, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0):
+            handle = chord * handle_scale
+            p1 = p0 + t0 * handle
+            p2 = p3 - t1 * handle
+
+            candidate: List[PathWaypoint] = []
+            for t in np.linspace(0.0, 1.0, 60):
+                u = 1.0 - float(t)
+                point = (
+                    u**3 * p0
+                    + 3.0 * u * u * float(t) * p1
+                    + 3.0 * u * float(t) * float(t) * p2
+                    + float(t) ** 3 * p3
+                )
+                if not candidate or np.hypot(point[0] - candidate[-1].x, point[1] - candidate[-1].y) > self.resolution * 1.5:
+                    candidate.append(PathWaypoint(float(point[0]), float(point[1]), direction))
+            candidate.append(PathWaypoint(float(p3[0]), float(p3[1]), direction))
+            candidate = self._annotate_headings(candidate, start_heading=start_heading, goal_heading=goal_heading)
+            if (
+                self._is_obstacle_feasible(candidate, obstacles)
+                and self._is_dynamically_feasible(candidate, start_heading)
+                and self._has_achievable_curvature(candidate)
+            ):
+                return candidate
+        return []
+
     def _state_key(self, x: float, y: float, yaw: float, direction: int) -> Tuple[int, int, int, int]:
         yaw_bins = 72
         yaw_bin = int(round(((yaw + np.pi) % (2 * np.pi)) / (2 * np.pi) * yaw_bins)) % yaw_bins
@@ -450,12 +519,8 @@ class MotionPlanner:
                       direction: int,
                       distance: float,
                       wheelbase: float) -> Tuple[float, float, float]:
-        d = distance * (1.0 if direction >= 0 else -1.0)
-        nx = x + d * np.cos(yaw)
-        ny = y + d * np.sin(yaw)
-        nyaw = yaw + (d / wheelbase) * np.tan(steer)
-        nyaw = self._normalize_angle(nyaw)
-        return nx, ny, nyaw
+        signed_distance = distance * (1.0 if direction >= 0 else -1.0)
+        return kinematic_bicycle_arc_step(x, y, yaw, steer, signed_distance, wheelbase)
 
     def _segment_is_collision_free(self,
                                    x: float,
@@ -472,9 +537,11 @@ class MotionPlanner:
         nx, ny, nyaw = x, y, yaw
         for _ in range(substeps):
             nx, ny, nyaw = self._bicycle_step(nx, ny, nyaw, steer, direction, step_len / substeps, wheelbase)
-            if nx < self.x_bounds[0] or nx > self.x_bounds[1] or ny < self.y_bounds[0] or ny > self.y_bounds[1]:
+            if self.x_bounds is not None and (nx < self.x_bounds[0] or nx > self.x_bounds[1]):
                 return False, (x, y, yaw)
-            if self._point_hits_obstacle((nx, ny), obstacles, clearance):
+            if self.y_bounds is not None and (ny < self.y_bounds[0] or ny > self.y_bounds[1]):
+                return False, (x, y, yaw)
+            if self._footprint_hits_obstacle((nx, ny, nyaw), obstacles, clearance):
                 return False, (x, y, yaw)
         return True, (nx, ny, nyaw)
 
@@ -513,7 +580,7 @@ class MotionPlanner:
         heapq.heappush(open_heap, (f0, 0.0, start_state))
 
         best_goal_key = None
-        max_expansions = 2000
+        max_expansions = self.max_expansions
         expansions = 0
 
         while open_heap and expansions < max_expansions:
@@ -593,7 +660,7 @@ class MotionPlanner:
         base_dir = 1 if start_direction >= 0 else -1
 
         candidates: List[List[PathWaypoint]] = []
-        for steer_count in (7, 9):
+        for steer_count in self.steer_counts:
             candidate = self._search_bicycle_path(
                 start=start,
                 goal=goal,
@@ -610,7 +677,7 @@ class MotionPlanner:
 
         # Only evaluate opposite start direction if preferred direction did not produce candidates.
         if not candidates:
-            for steer_count in (7, 9):
+            for steer_count in self.steer_counts:
                 candidate = self._search_bicycle_path(
                     start=start,
                     goal=goal,
@@ -726,9 +793,18 @@ class MotionPlanner:
                 best = min(filtered, key=lambda p: len(p))
                 return self._annotate_headings(best, start_heading=start_heading, goal_heading=goal_heading)
 
-        logger.warning("No feasible curved path found; returning least-straight available candidate.")
-        return self._annotate_headings(
-            [PathWaypoint(start[0], start[1], base_dir), PathWaypoint(goal[0], goal[1], base_dir)],
-            start_heading=start_heading,
-            goal_heading=goal_heading,
-        )
+        for direction in (base_dir, -base_dir):
+            bezier = self._bezier_maneuver(
+                start=start,
+                goal=goal,
+                start_heading=start_heading,
+                goal_heading=goal_heading,
+                direction=direction,
+                obstacles=obstacles,
+            )
+            if bezier:
+                logger.warning("Falling back to validated smooth Bezier maneuver.")
+                return bezier
+
+        logger.warning("No feasible curved path found.")
+        return []

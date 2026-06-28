@@ -1,8 +1,8 @@
 import numpy as np
 
-from KarlsPlayground.control.controllers import ParkingController
-from KarlsPlayground.control.path_planner import PathWaypoint
-from KarlsPlayground.control.trajectory_planner import TrajectoryTracker
+from KarlsPlayground.planning import BaselineParkingPlanner
+from KarlsPlayground.planning import PathWaypoint
+from KarlsPlayground.planning import TrajectoryTracker
 from KarlsPlayground.simulation.vehicle import AudiA5
 
 
@@ -16,8 +16,13 @@ def test_tracker_switches_to_reverse_near_seam_and_keeps_it():
     ]
     tracker.set_path(path)
 
-    # Close to seam: tracker should commit to reverse.
+    # Before the seam: tracker should keep forward instead of switching early.
     _, _, d1 = tracker._find_goal_point((3.9, -0.15), current_direction=1, lookahead=1.0)
+    assert d1 == 1
+    assert tracker.active_direction == 1
+
+    # At the seam: tracker should commit to reverse.
+    _, _, d1 = tracker._find_goal_point((4.0, -1.1), current_direction=1, lookahead=1.0)
     assert d1 == -1
     assert tracker.active_direction == -1
 
@@ -32,7 +37,7 @@ def test_two_stage_plan_prefers_forward_approach_when_available():
     goal = (0.25, 8.25, 0.0)
     x_bounds = (0.0, 22.0)
     y_bounds = (0.0, 32.0)
-    controller = ParkingController(
+    controller = BaselineParkingPlanner(
         planner_resolution=0.25,
         max_speed=2.0,
         max_reverse_speed=1.0,
