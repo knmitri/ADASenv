@@ -8,7 +8,6 @@ Realistic parking simulation focused on low-speed maneuvering and parking motion
 - `KarlsPlayground/simulation/scenarios`: scenario data models, parking scenario factories, and artifact I/O
 - `KarlsPlayground/simulation/visualization`: matplotlib-based simulator rendering
 - `KarlsPlayground/planning`: planner interface, baseline planner, path planning, trajectory generation, and tracking
-- `KarlsPlayground/demo_runner.py`: reusable demo workflow
 - `scripts`: scenario generation and challenge runners
 
 ## Planner Interface
@@ -30,30 +29,18 @@ calling `ParkingSimulationEnvironment.step(acceleration, steering_angle)`.
 ## Quick Start
 
 1. Create and activate a virtual environment.
-2. Install dependencies:
+2. Install the package and dependencies:
 
 ```bash
-pip install -r requirements.txt
+pip install -e .
 ```
 
-3. Run demo:
+3. Run the challenge:
 
 Generate a reusable scenario artifact once:
 
 ```bash
 python scripts/generate_parking_scenario.py
-```
-
-Then run the demo against that stored scenario:
-
-```bash
-python -m KarlsPlayground.demo_runner
-```
-
-or using package entrypoint:
-
-```bash
-parking-demo
 ```
 
 Run the six-slot parking challenge headlessly:

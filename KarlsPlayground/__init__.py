@@ -17,14 +17,5 @@ __all__ = [
     "ParkingScenario",
     "ParkingScenarioFactory",
     "ScenarioObject",
-    "run_demo",
     "SimulationVisualizer",
 ]
-
-
-def __getattr__(name):
-    if name == "run_demo":
-        from .demo_runner import run_demo
-
-        return run_demo
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
