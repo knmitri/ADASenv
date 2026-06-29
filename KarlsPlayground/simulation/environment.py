@@ -8,6 +8,7 @@ Units: SI (meters, seconds, radians)
 import numpy as np
 from typing import Tuple, Dict, Any, List
 from KarlsPlayground.simulation.scenarios import ParkingScenario, ParkingScenarioFactory
+from .kinematics import polygon_contains_polygon, polygon_intersects_polygon
 from .vehicle import Vehicle
 from .utils import normalize_angle
 
@@ -44,8 +45,7 @@ class ParkingSimulationEnvironment:
         # Load config values 
 
         # Simulation parameters
-        self.dt = self.sim_config['dt']
-        self.speed_factor = self.sim_config['speed_factor']
+        self.dt = float(self.sim_config['dt'])
         self.render_enabled = self.sim_config['render']
         self.max_episode_steps = self.sim_config['max_episode_steps']
 
@@ -58,8 +58,7 @@ class ParkingSimulationEnvironment:
         self.world_min_x = float(self.sim_config.get('world_min_x', -self.vehicle.length))
         self.world_min_y = float(self.sim_config.get('world_min_y', -self.vehicle.width))
 
-        # Tolerances from config (support both rad and deg names)
-        self.position_tolerance = self.sim_config['goal_position_tolerance']
+        self.boundary_margin = float(self.sim_config.get('collision_boundary_margin', 0.0))
         self.heading_tolerance = np.deg2rad(self.sim_config['goal_heading_tolerance_deg'])
    
     
@@ -88,8 +87,12 @@ class ParkingSimulationEnvironment:
                 obstacles.append({
                     'x': car.x,
                     'y': car.y,
+                    'heading': car.heading,
                     'width': car.length + 0.6,
-                    'length': car.width + 0.6
+                    'length': car.width + 0.6,
+                    'corners': car.get_corners().tolist(),
+                    'object_type': car.object_type,
+                    'object_id': car.object_id,
                 })
 
         wall_t = 0.25
@@ -185,7 +188,7 @@ class ParkingSimulationEnvironment:
             info: Dictionary with episode information (done, errors, rewards)
         """
         # Update vehicle dynamics
-        self.vehicle.update(acceleration, steering_angle, self.dt * self.speed_factor)
+        self.vehicle.update(acceleration, steering_angle, self.dt)
         
         # Record trajectory
         self.trajectory.append((self.vehicle.x, self.vehicle.y))
@@ -195,36 +198,14 @@ class ParkingSimulationEnvironment:
         pos_error = np.sqrt((self.vehicle.x - goal_x)**2 + (self.vehicle.y - goal_y)**2)
         heading_error = normalize_angle(self.vehicle.yaw - goal_heading)
         
-        # Check if whole vehicle is inside the slot
-        x_min = self.goal_slot.x - self.goal_slot.length / 2
-        x_max = self.goal_slot.x + self.goal_slot.length / 2
-        y_min = self.goal_slot.y - self.goal_slot.width / 2
-        y_max = self.goal_slot.y + self.goal_slot.width / 2
-            
         vehicle_corners = self.vehicle.get_corners()
-        all_corners_inside = all(
-            x_min <= corner[0] <= x_max and y_min <= corner[1] <= y_max
-            for corner in vehicle_corners
-        )
+        all_corners_inside = polygon_contains_polygon(self.goal_slot.get_corners(), vehicle_corners)
         
         goal_reached = all_corners_inside and abs(heading_error) < self.heading_tolerance
 
         # Collision check
         vehicle_corners = self.vehicle.get_corners()
         collision = self.check_collision(vehicle_corners)
-
-        min_x = self.world_min_x
-        min_y = self.world_min_y
-        lot_width = self.scenario.lot.lot_width
-        lot_length = self.scenario.lot.lot_length
-
-        out_of_bounds = np.any(vehicle_corners[:, 0] < min_x) or np.any(vehicle_corners[:, 0] > lot_width) or \
-                        np.any(vehicle_corners[:, 1] < min_y) or np.any(vehicle_corners[:, 1] > lot_length)
-        if out_of_bounds:
-            collision = True
-            self.vehicle.x = float(np.clip(self.vehicle.x, min_x + 0.1, lot_width - 0.1))
-            self.vehicle.y = float(np.clip(self.vehicle.y, min_y + 0.1, lot_length - 0.1))
-            self.vehicle.vx = 0.0
 
         if collision:
             self.collision_occurred = True
@@ -291,25 +272,29 @@ class ParkingSimulationEnvironment:
     
 
     def check_collision(self, vehicle_corners: np.ndarray) -> bool:
-        """Check if vehicle is out of lot bounds.
+        """Check vehicle footprint against lot bounds and static objects.
         
         Args:
             vehicle_corners: Array [4,2] of vehicle corner points
 
         Returns:
-            True if out of bounds, False otherwise
+            True if the footprint intersects an obstacle or leaves the lot.
         """
         vehicle_min_x = vehicle_corners[:, 0].min()
         vehicle_max_x = vehicle_corners[:, 0].max()
         vehicle_min_y = vehicle_corners[:, 1].min()
         vehicle_max_y = vehicle_corners[:, 1].max()
 
-        boundary_margin = 0.3
-        if (vehicle_min_x < self.world_min_x + boundary_margin or
-            vehicle_max_x > self.scenario.lot.lot_width - boundary_margin or
-            vehicle_min_y < self.world_min_y + boundary_margin or
-            vehicle_max_y > self.scenario.lot.lot_length - boundary_margin):
+        margin = self.boundary_margin
+        if (vehicle_min_x < self.world_min_x + margin or
+            vehicle_max_x > self.scenario.lot.lot_width - margin or
+            vehicle_min_y < self.world_min_y + margin or
+            vehicle_max_y > self.scenario.lot.lot_length - margin):
             return True
+
+        for obstacle in self.scenario.get_parked_cars():
+            if polygon_intersects_polygon(vehicle_corners, obstacle.get_corners()):
+                return True
 
         return False
     

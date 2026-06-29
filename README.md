@@ -37,13 +37,26 @@ pip install -e .
 
 3. Run the challenge:
 
-Generate a reusable scenario artifact once:
+Generate or refresh the stored perpendicular scenario artifact:
 
 ```bash
-python scripts/generate_parking_scenario.py
+python scripts/generate_parking_scenario.py \
+  --output artifacts/scenarios/single_side_empty_parking_lot.json \
+  --scenario-id single_side_empty_perpendicular_parking_lot
 ```
 
-Run the six-slot parking challenge headlessly:
+Generate or refresh the stored parallel parking scenario artifact:
+
+```bash
+python scripts/generate_parking_scenario.py \
+  --output artifacts/scenarios/single_side_empty_parallel_parking_lot.json \
+  --scenario-id single_side_empty_parallel_parking_lot \
+  --slot-orientation-deg 0 \
+  --slot-length 6.0
+```
+
+Run the default parking challenge headlessly. By default this runs both stored
+scenarios:
 
 ```bash
 python scripts/run_parking_challenge.py
@@ -64,11 +77,14 @@ python scripts/run_parking_challenge.py --planner your_module:YourPlanner
 The planner class should use the same constructor shape as `BaselineParkingPlanner`
 and implement the `KarlsPlayground.planning.ParkingPlanner` protocol.
 
-By default, the first scenario is stored at
-`artifacts/scenarios/single_side_empty_parking_lot.json`. This local
-artifact directory is intentionally separated from the simulator so it can later
-be replaced by an external artifact store such as JFrog Artifactory, S3, or an
-ADAS scenario database.
+The default stored scenarios are:
+
+- `artifacts/scenarios/single_side_empty_parking_lot.json`
+- `artifacts/scenarios/single_side_empty_parallel_parking_lot.json`
+
+This local artifact directory is intentionally separated from the simulator so
+it can later be replaced by an external artifact store such as JFrog Artifactory,
+S3, or an ADAS scenario database.
 
 ## Development
 

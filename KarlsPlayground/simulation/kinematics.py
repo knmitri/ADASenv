@@ -121,3 +121,44 @@ def polygon_intersects_aabb(polygon: np.ndarray, center: tuple[float, float], si
         if float(np.max(p_proj)) < float(np.min(r_proj)) or float(np.max(r_proj)) < float(np.min(p_proj)):
             return False
     return True
+
+
+def polygon_intersects_polygon(first: np.ndarray, second: np.ndarray) -> bool:
+    """Return whether two convex polygons intersect."""
+
+    axes: list[np.ndarray] = []
+    for points in (first, second):
+        for i in range(len(points)):
+            edge = points[(i + 1) % len(points)] - points[i]
+            axis = np.array([-edge[1], edge[0]], dtype=float)
+            norm = float(np.linalg.norm(axis))
+            if norm > 1e-9:
+                axes.append(axis / norm)
+
+    for axis in axes:
+        first_projection = first @ axis
+        second_projection = second @ axis
+        if (
+            float(np.max(first_projection)) < float(np.min(second_projection))
+            or float(np.max(second_projection)) < float(np.min(first_projection))
+        ):
+            return False
+    return True
+
+
+def point_in_convex_polygon(point: np.ndarray, polygon: np.ndarray, eps: float = 1e-9) -> bool:
+    """Return whether a point is inside or on the boundary of a convex polygon."""
+
+    signs: list[float] = []
+    for i in range(len(polygon)):
+        edge = polygon[(i + 1) % len(polygon)] - polygon[i]
+        rel = point - polygon[i]
+        signs.append(float(edge[0] * rel[1] - edge[1] * rel[0]))
+
+    return all(sign >= -eps for sign in signs) or all(sign <= eps for sign in signs)
+
+
+def polygon_contains_polygon(container: np.ndarray, inner: np.ndarray, eps: float = 1e-9) -> bool:
+    """Return whether every vertex of `inner` lies inside `container`."""
+
+    return all(point_in_convex_polygon(point, container, eps=eps) for point in inner)

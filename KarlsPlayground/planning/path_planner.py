@@ -8,6 +8,7 @@ from KarlsPlayground.simulation.kinematics import (
     VehicleGeometry,
     kinematic_bicycle_arc_step,
     polygon_intersects_aabb,
+    polygon_intersects_polygon,
 )
 from .trajectory_generator import catmull_rom_point
 
@@ -75,6 +76,12 @@ class PathPlanner:
         x, y, yaw = pose
         footprint = self.geometry.corners(x, y, yaw)
         for obs in obstacles:
+            if 'corners' in obs:
+                obstacle_polygon = np.array(obs['corners'], dtype=float)
+                if polygon_intersects_polygon(footprint, obstacle_polygon):
+                    return True
+                continue
+
             ox = obs['x']
             oy = obs['y']
             ow = float(obs.get('width', obs.get('length', 0.0))) + 2.0 * clearance

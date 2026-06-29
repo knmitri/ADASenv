@@ -70,47 +70,63 @@ class ParkingLot:
         
         slot_orientation_deg = parking_lot_config.get('slot_orientation_deg', 0.0)
         self.slot_orientation_rad = np.deg2rad(slot_orientation_deg)
-        self.slot_orientation_type = 'perpendicular' if self.slot_orientation_rad == np.pi/2  else ('parallel' if self.slot_orientation_rad == 0 else 'angled')
-
-        # Calculate total width and length needed
-        if self.layout == 'single_side':
-            self.lot_width = self.origin_x + self.slot_length + self.aisle_width
-            self.lot_length = self.origin_y + self.rows * self.slot_width + max(0, self.rows - 1) * self.gap_between_slots
-        elif self.slot_orientation_type == 'perpendicular':
-            self.lot_width = self.cols * self.slot_length + (self.cols - 1) * self.aisle_width + self.slot_length
-            self.lot_length = self.rows * self.slot_width + (self.rows - 1) * self.gap_between_slots + self.slot_width
-        elif self.slot_orientation_type == 'parallel':
-            self.lot_width = self.cols * self.slot_width + (self.cols - 1) * self.gap_between_slots + self.slot_width
-            self.lot_length = self.rows * self.slot_length + (self.rows - 1) * self.aisle_width + self.slot_length
-        elif self.slot_orientation_type == 'angled':
-            self.lot_width = self.cols * (self.slot_length * np.cos(self.slot_orientation_rad) + self.slot_width * np.sin(self.slot_orientation_rad)) + (self.cols - 1) * self.aisle_width + self.slot_length
-            self.lot_length = self.rows * (self.slot_length * np.sin(self.slot_orientation_rad) + self.slot_width * np.cos(self.slot_orientation_rad)) + (self.rows - 1) * self.gap_between_slots + self.slot_width
+        if np.isclose(self.slot_orientation_rad, np.pi / 2):
+            self.slot_orientation_type = 'perpendicular'
+        elif np.isclose(self.slot_orientation_rad, 0.0):
+            self.slot_orientation_type = 'parallel'
         else:
-            self.lot_width = self.cols * self.slot_length + (self.cols - 1) * self.aisle_width + self.slot_length
-            self.lot_length = self.rows * self.slot_width + (self.rows - 1) * self.gap_between_slots + self.slot_width
+            self.slot_orientation_type = 'angled'
 
         self.slots: List[ParkingSlot] = []
-
+        self.lot_width = 0.0
+        self.lot_length = 0.0
         self.create_parking_layout()
+        self._update_bounds_from_slots()
+
+    def _slot_heading(self) -> float:
+        if self.slot_orientation_type == 'perpendicular':
+            return 0.0
+        if self.slot_orientation_type == 'parallel':
+            return np.pi / 2
+        return float(self.slot_orientation_rad)
+
+    def _single_side_pitch(self, heading: float) -> float:
+        """Return spacing along the row direction for one slot."""
+
+        return abs(self.slot_length * np.sin(heading)) + abs(self.slot_width * np.cos(heading))
+
+    def _single_side_center_x(self, heading: float) -> float:
+        """Place the slot so its aisle-facing edge starts at origin_x."""
+
+        half_length_x = abs((self.slot_length / 2.0) * np.cos(heading))
+        half_width_x = abs((self.slot_width / 2.0) * np.sin(heading))
+        return self.origin_x + half_length_x + half_width_x
+
+    def _update_bounds_from_slots(self) -> None:
+        """Set rectangular world extents that contain all generated slots."""
+
+        if not self.slots:
+            self.lot_width = self.origin_x
+            self.lot_length = self.origin_y
+            return
+
+        corners = np.vstack([slot.get_corners() for slot in self.slots])
+        self.lot_width = float(max(self.origin_x, np.max(corners[:, 0])))
+        self.lot_length = float(max(self.origin_y, np.max(corners[:, 1])))
 
     def create_parking_layout(self) -> None:
         """Create parking slots in a rxc grid arrangement with orientation type tracked."""
         slot_width = self.slot_width
         slot_length = self.slot_length
         orientation = self.slot_orientation_type
-        heading = 0.0
-        if orientation == 'perpendicular':
-            heading = 0.0
-        elif orientation == 'parallel':
-            heading = np.pi / 2
-        elif orientation == 'angled':
-            heading = self.slot_orientation_rad
+        heading = self._slot_heading()
 
         if self.layout == 'single_side':
-            x = self.origin_x + slot_length / 2
-            y_start = self.origin_y + slot_width / 2
+            x = self._single_side_center_x(heading)
+            pitch = self._single_side_pitch(heading)
+            y_start = self.origin_y + pitch / 2.0
             for row in range(self.rows):
-                y = y_start + row * (slot_width + self.gap_between_slots)
+                y = y_start + row * (pitch + self.gap_between_slots)
                 slot = ParkingSlot(
                     x,
                     y,
@@ -122,13 +138,13 @@ class ParkingLot:
                 self.slots.append(slot)
             return
 
-        x_start = self.origin_x + slot_length / 2 + 0.5
-        y_start = self.origin_y + slot_width / 2 + 0.5
+        x_start = self.origin_x + self._single_side_center_x(heading) - self.origin_x
+        y_start = self.origin_y + self._single_side_pitch(heading) / 2.0
 
         for row in range(self.rows):
             for col in range(self.cols):
                 x = x_start + col * (slot_length + self.aisle_width)
-                y = y_start + row * (slot_width + self.aisle_width)
+                y = y_start + row * (self._single_side_pitch(heading) + self.aisle_width)
                 slot = ParkingSlot(x, y, heading=heading, width=slot_width, length=slot_length, orientation=orientation)
                 self.slots.append(slot)
 

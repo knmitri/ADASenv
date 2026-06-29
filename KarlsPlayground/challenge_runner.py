@@ -19,8 +19,10 @@ from KarlsPlayground.simulation import AudiA5, ParkingSimulationEnvironment, Sim
 from KarlsPlayground.simulation.visualization import SimulationVisualizer
 
 
-DEFAULT_SCENARIO_ARTIFACT = (
-    Path(__file__).resolve().parents[1] / "artifacts" / "scenarios" / "single_side_empty_parking_lot.json"
+SCENARIO_DIR = Path(__file__).resolve().parents[1] / "artifacts" / "scenarios"
+DEFAULT_SCENARIO_ARTIFACTS = (
+    SCENARIO_DIR / "single_side_empty_parking_lot.json",
+    SCENARIO_DIR / "single_side_empty_parallel_parking_lot.json",
 )
 
 
@@ -133,7 +135,7 @@ def run_slot(
             goal_pose=goal_pose,
         )
         status = "pass" if info.get("goal_reached", False) else "fail"
-        render_path = save_render_dir / f"slot_{scenario.goal_slot_index}_{status}.png"
+        render_path = save_render_dir / f"{scenario.scenario_id}_slot_{scenario.goal_slot_index}_{status}.png"
         if visualizer.fig is not None:
             visualizer.fig.savefig(render_path, dpi=150)
 
@@ -163,7 +165,13 @@ def run_slot(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--scenario-artifact", type=Path, default=DEFAULT_SCENARIO_ARTIFACT)
+    parser.add_argument(
+        "--scenario-artifact",
+        type=Path,
+        nargs="+",
+        default=list(DEFAULT_SCENARIO_ARTIFACTS),
+        help="Scenario artifact(s) to run. Defaults to all built-in challenge scenarios.",
+    )
     parser.add_argument("--slots", type=int, nargs="*", default=None)
     parser.add_argument("--log-interval", type=int, default=0)
     parser.add_argument("--max-expansions", type=int, default=200)
@@ -195,69 +203,80 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    base_scenario = load_parking_scenario(args.scenario_artifact.resolve())
     config = get_config()
     config["simulation"] = dict(config["simulation"])
     config["simulation"]["render"] = False
     planner_class = load_planner_class(args.planner)
     vehicle_for_fit = AudiA5()
-    length_margin = base_scenario.lot.slot_length - vehicle_for_fit.length
-    width_margin = base_scenario.lot.slot_width - vehicle_for_fit.width
 
-    slots = args.slots if args.slots is not None else list(range(base_scenario.lot.num_slots))
-    invalid = [slot for slot in slots if slot < 0 or slot >= base_scenario.lot.num_slots]
-    if invalid:
-        raise ValueError(f"Invalid slot indices {invalid}; valid range is 0..{base_scenario.lot.num_slots - 1}")
+    scenario_paths = [path.resolve() for path in args.scenario_artifact]
+    base_scenarios = [load_parking_scenario(path) for path in scenario_paths]
 
-    print(f"Scenario artifact: {args.scenario_artifact.resolve()}", flush=True)
-    print(f"Testing slots: {', '.join(str(slot) for slot in slots)}", flush=True)
+    print("Scenario artifacts:", flush=True)
+    for path in scenario_paths:
+        print(f"  {path}", flush=True)
     print(
         f"Planner budget: max_expansions={args.max_expansions}, steer_count={args.steer_count}",
         flush=True,
     )
     print(f"Planner: {args.planner}", flush=True)
-    print(
-        f"Physical fit: slot={base_scenario.lot.slot_length:.2f}m x "
-        f"{base_scenario.lot.slot_width:.2f}m, vehicle={vehicle_for_fit.length:.2f}m x "
-        f"{vehicle_for_fit.width:.2f}m, margins=length {length_margin:.2f}m / "
-        f"width {width_margin:.2f}m",
-        flush=True,
-    )
     print(flush=True)
 
     results = []
-    for slot in slots:
-        scenario = scenario_for_slot(base_scenario, slot)
-        print(f"Slot {slot}:", flush=True)
-        result = run_slot(
-            config,
-            scenario,
-            log_interval=args.log_interval,
-            max_expansions=args.max_expansions,
-            steer_count=args.steer_count,
-            live_render=args.render,
-            render_every=max(1, args.render_every),
-            save_render_dir=args.save_render_dir,
-            planner_class=planner_class,
-        )
-        results.append(result)
-        status = "PASS" if result["success"] else "FAIL"
+    for base_scenario in base_scenarios:
+        length_margin = base_scenario.lot.slot_length - vehicle_for_fit.length
+        width_margin = base_scenario.lot.slot_width - vehicle_for_fit.width
+        slots = args.slots if args.slots is not None else list(range(base_scenario.lot.num_slots))
+        invalid = [slot for slot in slots if slot < 0 or slot >= base_scenario.lot.num_slots]
+        if invalid:
+            raise ValueError(
+                f"Invalid slot indices {invalid} for {base_scenario.scenario_id}; "
+                f"valid range is 0..{base_scenario.lot.num_slots - 1}"
+            )
+
+        print(f"Scenario {base_scenario.scenario_id}:", flush=True)
+        print(f"  Testing slots: {', '.join(str(slot) for slot in slots)}", flush=True)
         print(
-            f"  {status} steps={result['steps']} path={result['path_len']} "
-            f"plan={result['plan_seconds']:.1f}s "
-            f"dir=+{result['forward']}/-{result['reverse']} "
-            f"pos_err={result['position_error']:.3f}m "
-            f"heading_err={result['heading_error_deg']:.2f}deg "
-            f"collision={result['collision_occurred']}",
+            f"  Physical fit: slot={base_scenario.lot.slot_length:.2f}m x "
+            f"{base_scenario.lot.slot_width:.2f}m, vehicle={vehicle_for_fit.length:.2f}m x "
+            f"{vehicle_for_fit.width:.2f}m, margins=length {length_margin:.2f}m / "
+            f"width {width_margin:.2f}m",
             flush=True,
         )
-        print(
-            f"  final_pose=({result['final_x']:.2f}, {result['final_y']:.2f}, "
-            f"{result['final_heading_deg']:.1f}deg)",
-            flush=True,
-        )
-        if result["render_path"]:
-            print(f"  render={result['render_path']}", flush=True)
+        for slot in slots:
+            scenario = scenario_for_slot(base_scenario, slot)
+            print(f"  Slot {slot}:", flush=True)
+            result = run_slot(
+                config,
+                scenario,
+                log_interval=args.log_interval,
+                max_expansions=args.max_expansions,
+                steer_count=args.steer_count,
+                live_render=args.render,
+                render_every=max(1, args.render_every),
+                save_render_dir=args.save_render_dir,
+                planner_class=planner_class,
+            )
+            result["scenario_id"] = base_scenario.scenario_id
+            results.append(result)
+            status = "PASS" if result["success"] else "FAIL"
+            print(
+                f"    {status} steps={result['steps']} path={result['path_len']} "
+                f"plan={result['plan_seconds']:.1f}s "
+                f"dir=+{result['forward']}/-{result['reverse']} "
+                f"pos_err={result['position_error']:.3f}m "
+                f"heading_err={result['heading_error_deg']:.2f}deg "
+                f"collision={result['collision_occurred']}",
+                flush=True,
+            )
+            print(
+                f"    final_pose=({result['final_x']:.2f}, {result['final_y']:.2f}, "
+                f"{result['final_heading_deg']:.1f}deg)",
+                flush=True,
+            )
+            if result["render_path"]:
+                print(f"    render={result['render_path']}", flush=True)
+        print(flush=True)
 
     passed = sum(1 for result in results if result["success"])
     print(flush=True)
