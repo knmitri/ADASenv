@@ -1,7 +1,7 @@
 import numpy as np
 
-from KarlsPlayground.simulation import MotionCommand, SimulatorController
-from KarlsPlayground.simulation import AudiA5
+from simulator.simulation import MotionCommand, SimulatorController
+from simulator.simulation import AudiA5
 
 
 def test_arbitrator_clamps_to_vehicle_actuator_limits():

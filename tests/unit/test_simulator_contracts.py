@@ -2,9 +2,9 @@ import copy
 
 import numpy as np
 
-from KarlsPlayground.simulation import AudiA5, ParkingLot, ParkingSimulationEnvironment
-from KarlsPlayground.simulation.scenarios.models import ScenarioObject
-from KarlsPlayground.simulation.scenarios.parking import ParkingScenario
+from simulator.simulation import AudiA5, ParkingLot, ParkingSimulationEnvironment
+from simulator.simulation.scenarios.models import ScenarioObject
+from simulator.simulation.scenarios.parking import ParkingScenario
 
 
 def _config(speed_factor: float = 1.0) -> dict:

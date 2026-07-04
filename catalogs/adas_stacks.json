@@ -1,0 +1,11 @@
+{
+  "stacks": [
+    {
+      "id": "reference_parking",
+      "name": "Reference Parking ADAS Stack",
+      "description": "Reference parking ADAS core wrapped by the TCP JSON simulator bridge.",
+      "executable": "build/Release/tcp_json_sim_bridge.exe",
+      "args": ["--tcp-client", "--host", "{host}", "--port", "{port}"]
+    }
+  ]
+}

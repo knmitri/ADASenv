@@ -11,8 +11,8 @@ from _project import PROJECT_ROOT, add_project_root_to_path
 DEFAULT_OUTPUT = PROJECT_ROOT / "artifacts" / "scenarios" / "single_side_empty_parking_lot.json"
 add_project_root_to_path()
 
-from KarlsPlayground.config_loader import get_config
-from KarlsPlayground.simulation.scenarios import ParkingScenarioFactory, save_scenario
+from simulator.config_loader import get_config
+from simulator.simulation.scenarios import ParkingScenarioFactory, save_scenario
 
 
 def parse_args() -> argparse.Namespace:
