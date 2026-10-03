@@ -21,8 +21,8 @@ from simulator.adas_stack_catalog import (
 from simulator.config_loader import get_config
 from simulator.simulation import AudiA5, MotionCommand, ParkingSimulationEnvironment, SimulatorController
 from simulator.simulation.challenge import (
-    DEFAULT_SCENARIO_ARTIFACTS,
     default_goal_slots,
+    scenario_artifacts_for_suite,
     scenario_for_slot,
     scenario_slots_as_dict,
 )
@@ -261,7 +261,12 @@ def run_experiment(args: argparse.Namespace) -> int:
     config["simulation"] = dict(config["simulation"])
     config["simulation"]["render"] = False
 
-    scenario_paths = [path.resolve() for path in args.scenario_artifact]
+    selected_artifacts = (
+        args.scenario_artifact
+        if args.scenario_artifact is not None
+        else scenario_artifacts_for_suite(args.scenario_suite)
+    )
+    scenario_paths = [path.resolve() for path in selected_artifacts]
     base_scenarios = [load_parking_scenario(path) for path in scenario_paths]
     vehicle_for_fit = AudiA5()
     stack_process: subprocess.Popen | None = None
@@ -308,7 +313,12 @@ def run_experiment(args: argparse.Namespace) -> int:
         for base_scenario in base_scenarios:
             length_margin = base_scenario.lot.slot_length - vehicle_for_fit.length
             width_margin = base_scenario.lot.slot_width - vehicle_for_fit.width
-            slots = args.slots if args.slots is not None else default_goal_slots(base_scenario)
+            if args.slots is not None:
+                slots = args.slots
+            elif args.all_empty_slots:
+                slots = default_goal_slots(base_scenario)
+            else:
+                slots = [base_scenario.goal_slot_index]
             invalid = [slot for slot in slots if slot < 0 or slot >= base_scenario.lot.num_slots]
             if invalid:
                 raise ValueError(
@@ -407,10 +417,21 @@ def parse_args() -> argparse.Namespace:
         "--scenario-artifact",
         type=Path,
         nargs="+",
-        default=list(DEFAULT_SCENARIO_ARTIFACTS),
-        help="Scenario artifact(s) to run. Defaults to all built-in challenge scenarios.",
+        default=None,
+        help="Explicit scenario artifact(s). Overrides --scenario-suite.",
+    )
+    parser.add_argument(
+        "--scenario-suite",
+        choices=("smoke", "benchmark", "all"),
+        default="smoke",
+        help="Built-in scenario suite to run when --scenario-artifact is omitted (default: smoke).",
     )
     parser.add_argument("--slots", type=int, nargs="*", default=None)
+    parser.add_argument(
+        "--all-empty-slots",
+        action="store_true",
+        help="Run every unoccupied slot in each selected scenario instead of its declared goal slot.",
+    )
     parser.add_argument("--log-interval", type=int, default=0)
     parser.add_argument("--render", action="store_true")
     parser.add_argument("--render-every", type=int, default=5)

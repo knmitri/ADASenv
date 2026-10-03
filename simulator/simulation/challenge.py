@@ -11,12 +11,36 @@ from simulator.simulation.scenarios.parking import ParkingScenario
 
 
 SCENARIO_DIR = Path(__file__).resolve().parents[2] / "artifacts" / "scenarios"
-DEFAULT_SCENARIO_ARTIFACTS = (
-    SCENARIO_DIR / "single_side_empty_parking_lot.json",
-    SCENARIO_DIR / "single_side_empty_parallel_parking_lot.json",
-    SCENARIO_DIR / "single_side_obstacle_parking_lot.json",
-    SCENARIO_DIR / "single_side_obstacle_parallel_parking_lot.json",
+SMOKE_SCENARIO_ARTIFACTS = (
+    SCENARIO_DIR / "smoke" / "empty_perpendicular.json",
+    SCENARIO_DIR / "smoke" / "empty_parallel.json",
+    SCENARIO_DIR / "smoke" / "perpendicular_between_two_cars.json",
+    SCENARIO_DIR / "smoke" / "parallel_between_two_cars.json",
 )
+BENCHMARK_SCENARIO_ARTIFACTS = (
+    SCENARIO_DIR / "benchmark" / "perpendicular_static_obstacles.json",
+    SCENARIO_DIR / "benchmark" / "parallel_static_obstacles.json",
+    SCENARIO_DIR / "benchmark" / "parallel_tight_between_two_cars.json",
+    SCENARIO_DIR / "benchmark" / "parallel_offset_between_two_cars.json",
+    SCENARIO_DIR / "benchmark" / "parallel_end_slot.json",
+    SCENARIO_DIR / "benchmark" / "angled_60_between_two_cars.json",
+    SCENARIO_DIR / "benchmark" / "perpendicular_bollard_at_entrance.json",
+)
+DEFAULT_SCENARIO_ARTIFACTS = SMOKE_SCENARIO_ARTIFACTS
+
+
+def scenario_artifacts_for_suite(suite: str) -> tuple[Path, ...]:
+    """Return the artifacts belonging to a named deterministic scenario suite."""
+
+    suites = {
+        "smoke": SMOKE_SCENARIO_ARTIFACTS,
+        "benchmark": BENCHMARK_SCENARIO_ARTIFACTS,
+        "all": SMOKE_SCENARIO_ARTIFACTS + BENCHMARK_SCENARIO_ARTIFACTS,
+    }
+    try:
+        return suites[suite]
+    except KeyError as exc:
+        raise ValueError(f"Unknown scenario suite {suite!r}. Available: {', '.join(suites)}") from exc
 
 
 def scenario_for_slot(base: ParkingScenario, slot_index: int) -> ParkingScenario:

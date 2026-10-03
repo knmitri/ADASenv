@@ -103,7 +103,7 @@ After editable install:
 parking-experiment --adas-stack reference_parking --slots 0
 ```
 
-Run the full default scenario catalog:
+Run the default smoke catalog:
 
 ```bash
 python -m simulator.experiment_runner --adas-stack reference_parking
@@ -142,51 +142,56 @@ Then in another terminal:
 
 ## Scenario Catalog
 
-Generate or refresh the perpendicular scenario:
+Scenario artifacts are split into two deterministic suites:
+
+- `artifacts/scenarios/smoke`: four quick regression cases: empty perpendicular,
+  empty parallel, and parking between two cars in both layouts.
+- `artifacts/scenarios/benchmark`: static-obstacle, tight-gap, offset-vehicle,
+  end-slot, 60-degree angled, and bollard cases.
+
+Run the smoke suite, which is the default:
+
+```bash
+python -m simulator.experiment_runner --adas-stack reference_parking --scenario-suite smoke
+```
+
+Run the broader planner-development benchmark:
+
+```bash
+python -m simulator.experiment_runner --adas-stack reference_parking --scenario-suite benchmark
+```
+
+Run every built-in artifact:
+
+```bash
+python -m simulator.experiment_runner --adas-stack reference_parking --scenario-suite all
+```
+
+Each artifact runs its declared `goal_slot_index` by default. To evaluate every
+unoccupied slot in each selected layout instead, use `--all-empty-slots`.
+
+The core parallel challenge is:
+
+- `artifacts/scenarios/smoke/parallel_between_two_cars.json`
+
+Its target is slot 3, with parked cars in slots 2 and 4. The 6.0 m bay leaves
+0.665 m longitudinal clearance at each end around the 4.67 m reference vehicle.
+
+Generate a new baseline artifact with:
 
 ```bash
 python scripts/generate_parking_scenario.py \
-  --output artifacts/scenarios/single_side_empty_parking_lot.json \
-  --scenario-id single_side_empty_perpendicular_parking_lot
+  --output artifacts/scenarios/benchmark/my_scenario.json \
+  --scenario-id my_scenario
 ```
 
-Generate or refresh the parallel scenario:
+Use explicit artifacts during development without changing a suite:
 
 ```bash
-python scripts/generate_parking_scenario.py \
-  --output artifacts/scenarios/single_side_empty_parallel_parking_lot.json \
-  --scenario-id single_side_empty_parallel_parking_lot \
-  --slot-orientation-deg 0 \
-  --slot-length 6.0
+python -m simulator.experiment_runner \
+  --adas-stack reference_parking \
+  --scenario-artifact artifacts/scenarios/benchmark/my_scenario.json
 ```
-
-Generate obstacle variants:
-
-```bash
-python scripts/generate_parking_scenario.py \
-  --output artifacts/scenarios/single_side_obstacle_parking_lot.json \
-  --scenario-id single_side_obstacle_perpendicular_parking_lot \
-  --occupancy 0.5 \
-  --seed 7
-
-python scripts/generate_parking_scenario.py \
-  --output artifacts/scenarios/single_side_obstacle_parallel_parking_lot.json \
-  --scenario-id single_side_obstacle_parallel_parking_lot \
-  --slot-orientation-deg 0 \
-  --slot-length 6.0 \
-  --occupancy 0.5 \
-  --seed 11
-```
-
-The default scenario catalog is:
-
-- `artifacts/scenarios/single_side_empty_parking_lot.json`
-- `artifacts/scenarios/single_side_empty_parallel_parking_lot.json`
-- `artifacts/scenarios/single_side_obstacle_parking_lot.json`
-- `artifacts/scenarios/single_side_obstacle_parallel_parking_lot.json`
-
-For scenarios with parked cars, the runner tests only empty slots unless
-`--slots` is passed explicitly.
 
 ## Future Web UI
 
