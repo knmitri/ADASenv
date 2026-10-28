@@ -88,8 +88,8 @@ class ParkingSimulationEnvironment:
                     'x': car.x,
                     'y': car.y,
                     'heading': car.heading,
-                    'width': car.length + 0.6,
-                    'length': car.width + 0.6,
+                    'length': car.length + 0.6,
+                    'width': car.width + 0.6,
                     'corners': car.get_corners().tolist(),
                     'object_type': car.object_type,
                     'object_id': car.object_id,
@@ -102,10 +102,10 @@ class ParkingSimulationEnvironment:
         lot_length = self.scenario.lot.lot_length
 
         obstacles.extend([
-            {'x': (min_x + lot_width) * 0.5, 'y': min_y - wall_t * 0.5, 'width': lot_width - min_x + 2 * wall_t, 'length': wall_t, 'boundary_wall': True},
-            {'x': (min_x + lot_width) * 0.5, 'y': lot_length + wall_t * 0.5, 'width': lot_width - min_x + 2 * wall_t, 'length': wall_t, 'boundary_wall': True},
-            {'x': min_x - wall_t * 0.5, 'y': (min_y + lot_length) * 0.5, 'width': wall_t, 'length': lot_length - min_y + 2 * wall_t, 'boundary_wall': True},
-            {'x': lot_width + wall_t * 0.5, 'y': (min_y + lot_length) * 0.5, 'width': wall_t, 'length': lot_length - min_y + 2 * wall_t, 'boundary_wall': True},
+            {'x': (min_x + lot_width) * 0.5, 'y': min_y - wall_t * 0.5, 'length': lot_width - min_x + 2 * wall_t, 'width': wall_t, 'boundary_wall': True},
+            {'x': (min_x + lot_width) * 0.5, 'y': lot_length + wall_t * 0.5, 'length': lot_width - min_x + 2 * wall_t, 'width': wall_t, 'boundary_wall': True},
+            {'x': min_x - wall_t * 0.5, 'y': (min_y + lot_length) * 0.5, 'length': wall_t, 'width': lot_length - min_y + 2 * wall_t, 'boundary_wall': True},
+            {'x': lot_width + wall_t * 0.5, 'y': (min_y + lot_length) * 0.5, 'length': wall_t, 'width': lot_length - min_y + 2 * wall_t, 'boundary_wall': True},
         ])
         return obstacles
 
@@ -226,6 +226,7 @@ class ParkingSimulationEnvironment:
             'goal_reached': goal_reached,
             'collision': collision,
             'collision_occurred': self.collision_occurred,
+            'stuck': self.step_count >= self.max_episode_steps and not goal_reached,
             'episode_step': self.step_count,
             'goal_slot': self.goal_slot_index,
         }

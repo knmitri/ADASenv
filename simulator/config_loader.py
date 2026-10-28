@@ -22,10 +22,6 @@ def load_config() -> Dict[str, Any]:
     config['simulation']['goal_heading_tolerance'] = np.deg2rad(
         config['simulation']['goal_heading_tolerance_deg']
     )
-    config['planner']['yaw_resolution'] = np.deg2rad(
-        config['planner']['yaw_resolution_deg']
-    )
-    
     return config
 
 

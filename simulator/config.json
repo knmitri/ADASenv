@@ -16,7 +16,7 @@
     "seed": 42
   },
   "simulation": {
-    "render": true,
+    "render": false,
     "dt": 0.05,
     "max_episode_steps": 2000,
     "episodes": 12,
@@ -49,21 +49,5 @@
     "slot_edge_color": "black",
     "slot_color_goal": "green",
     "slot_color_other": "gray"
-  },
-  "planner": {
-    "max_speed": 4,
-    "max_reverse_speed": -2,
-    "xy_resolution": 0.1,
-    "yaw_resolution_deg": 3.0,
-    "step_size": 0.5,
-    "integration_steps": 6,
-    "max_expansions": 50000,
-    "steer_count": 11,
-    "two_stage_parking": true
-  },
-  "path_smoothing": {
-    "min_spacing": 0.05,
-    "max_jump": 0.20,
-    "chaikin_passes": 2
   }
 }
