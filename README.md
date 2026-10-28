@@ -13,6 +13,9 @@ The bridge is intentionally outside the ADAS stack. The ADAS stack should stay
 portable enough to later integrate into a vehicle architecture; the bridge is
 only the local experiment adapter.
 
+For contributor-oriented architecture documentation, see the
+[architecture guide index](docs/README.md).
+
 ## Architecture
 
 ```text
