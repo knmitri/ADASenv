@@ -24,9 +24,10 @@ int run_tcp_client(int argc, char** argv) {
             if (type == "hello") {
                 client.write_line(hello_response());
             } else if (type == "reset") {
-                client.write_line(ready_response(stack.reset(parse_reset_request(line))));
+                client.write_line(ready_response(
+                    stack.reset(parse_reset_request(line)), stack.planning_diagnostics()));
             } else if (type == "state") {
-                client.write_line(command_response(stack.command(parse_state_request(line))));
+                client.write_line(command_response(stack.command(parse_state_request(line)), stack.trajectory()));
             } else if (type == "result") {
                 client.write_line(ack_response());
             } else if (type == "shutdown") {

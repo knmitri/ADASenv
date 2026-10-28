@@ -24,6 +24,7 @@ from simulator.simulation.challenge import (
     default_goal_slots,
     scenario_artifacts_for_suite,
     scenario_for_slot,
+    slot_as_dict,
     scenario_slots_as_dict,
 )
 from simulator.simulation.scenarios import load_parking_scenario
@@ -73,6 +74,25 @@ def to_jsonable(value: Any) -> Any:
     return value
 
 
+class ExperimentTraceLogger:
+    """Write compact, replay-friendly simulator/ADAS exchange traces."""
+
+    def __init__(self, directory: Path, scenario: ParkingScenario):
+        directory.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        self.path = directory / (
+            f"{scenario.scenario_id}_slot_{scenario.goal_slot_index}_{stamp}.jsonl"
+        )
+        self._file = self.path.open("w", encoding="utf-8")
+
+    def write(self, event: str, **data: Any) -> None:
+        self._file.write(json.dumps({"event": event, **to_jsonable(data)}, separators=(",", ":")) + "\n")
+        self._file.flush()
+
+    def close(self) -> None:
+        self._file.close()
+
+
 def vehicle_as_dict(vehicle: AudiA5) -> dict[str, float]:
     return {
         "length": float(vehicle.length),
@@ -82,6 +102,10 @@ def vehicle_as_dict(vehicle: AudiA5) -> dict[str, float]:
         "max_steering_rate": float(vehicle.MAX_STEERING_RATE),
         "max_acceleration": float(vehicle.MAX_ACCELERATION),
         "max_deceleration": float(vehicle.MAX_DECELERATION),
+        "max_speed": float(vehicle.MAX_SPEED),
+        "max_reverse_speed": float(vehicle.MAX_REVERSE_SPEED),
+        "front_overhang": float(getattr(vehicle, "_FRONT_OVERHANG", 0.0)),
+        "rear_overhang": float(getattr(vehicle, "_REAR_OVERHANG", 0.0)),
     }
 
 
@@ -104,6 +128,7 @@ def run_remote_slot(
     live_render: bool,
     render_every: int,
     save_render_dir: Path | None,
+    trace_dir: Path | None,
 ) -> dict[str, Any]:
     vehicle = AudiA5()
     sim = ParkingSimulationEnvironment(vehicle=vehicle, config=config, scenario=scenario)
@@ -122,10 +147,15 @@ def run_remote_slot(
         "slots": scenario_slots_as_dict(scenario),
         "goal_pose": goal_pose,
         "goal": goal_pose,
+        "goal_slot": slot_as_dict(scenario.goal_slot_index, scenario.goal_slot),
         "start": tuple(state["position"]),
         "start_heading": float(state["heading"]),
         "initial_state": state,
-        "static_obstacles": sim.get_static_obstacles(),
+        "static_obstacles": [
+            obstacle
+            for obstacle in sim.get_static_obstacles()
+            if not obstacle.get("boundary_wall", False)
+        ],
         "vehicle": vehicle_as_dict(vehicle),
         "simulation": {
             "dt": float(config["simulation"]["dt"]),
@@ -134,8 +164,12 @@ def run_remote_slot(
             "world_min_y": float(sim.world_min_y),
             "world_max_x": float(scenario.lot.lot_width),
             "world_max_y": float(scenario.lot.lot_length),
+            "replan_position_threshold": 0.75,
+            "replan_heading_threshold": 0.35,
+            "goal_heading_tolerance": float(config["simulation"]["goal_heading_tolerance"]),
         },
     }
+    trace = ExperimentTraceLogger(trace_dir, scenario) if trace_dir is not None else None
 
     plan_start = time.perf_counter()
     connection.send(reset_payload)
@@ -143,10 +177,13 @@ def run_remote_slot(
     if ready.get("type") not in {"ready", "ack"}:
         raise RuntimeError(f"Expected ready response after reset, got {ready}")
     sim.planned_path = path_from_response(ready)
+    if trace is not None:
+        trace.write("reset", request=reset_payload, response=ready)
     plan_seconds = time.perf_counter() - plan_start
 
     info: dict[str, Any] = {}
     total_steps = 0
+    path_signature = None
     while True:
         if live_render and visualizer is not None and total_steps % render_every == 0:
             visualizer.render(
@@ -159,11 +196,12 @@ def run_remote_slot(
                 goal_pose=goal_pose,
             )
 
+        state_before = state
         connection.send(
             {
                 "type": "state",
                 "step": total_steps,
-                "state": state,
+                "state": state_before,
                 "goal_pose": goal_pose,
                 "dynamic_obstacles": sim.get_dynamic_obstacles(),
             }
@@ -173,6 +211,14 @@ def run_remote_slot(
             raise RuntimeError(f"Expected command response, got {response}")
         if "planned_path" in response or "path" in response:
             sim.planned_path = path_from_response(response)
+            new_signature = (
+                len(sim.planned_path),
+                sim.planned_path[0] if sim.planned_path else None,
+                sim.planned_path[-1] if sim.planned_path else None,
+            )
+            if trace is not None and new_signature != path_signature:
+                trace.write("trajectory_update", step=total_steps, trajectory=response.get("planned_path", response.get("path", [])))
+            path_signature = new_signature
 
         requested = MotionCommand(
             longitudinal_acceleration_mps2=float(response["longitudinal_acceleration_mps2"]),
@@ -190,6 +236,24 @@ def run_remote_slot(
             )
 
         state, info = sim.step(acceleration, steering)
+        if trace is not None:
+            trace_response = {
+                key: value
+                for key, value in response.items()
+                if key not in {"planned_path", "path"}
+            }
+            trace.write(
+                "step",
+                step=total_steps,
+                command={
+                    "requested": trace_response,
+                    "applied_acceleration_mps2": acceleration,
+                    "applied_steering_rad": steering,
+                },
+                state_before=state_before,
+                state_after=state,
+                info=info,
+            )
         total_steps += 1
         if info["done"]:
             break
@@ -206,7 +270,11 @@ def run_remote_slot(
             planned_path=sim.planned_path,
             goal_pose=goal_pose,
         )
-        status = "pass" if info.get("goal_reached", False) else "fail"
+        status = (
+            "pass" if info.get("goal_reached", False)
+            else "stuck" if info.get("stuck", False)
+            else "fail"
+        )
         render_path = save_render_dir / f"{scenario.scenario_id}_slot_{scenario.goal_slot_index}_{status}.png"
         if visualizer.fig is not None:
             visualizer.fig.savefig(render_path, dpi=150)
@@ -219,6 +287,7 @@ def run_remote_slot(
 
     goal_reached = bool(info.get("goal_reached", False))
     collision_occurred = bool(info.get("collision_occurred", False))
+    stuck = bool(info.get("stuck", False))
     result = {
         "slot": scenario.goal_slot_index,
         "success": goal_reached and not collision_occurred,
@@ -229,11 +298,16 @@ def run_remote_slot(
         "position_error": float(info.get("position_error", np.nan)),
         "heading_error_deg": float(np.rad2deg(abs(info.get("heading_error", np.nan)))),
         "collision_occurred": collision_occurred,
+        "stuck": stuck,
         "final_x": float(final_position[0]),
         "final_y": float(final_position[1]),
         "final_heading_deg": float(np.rad2deg(final_heading)),
         "render_path": str(render_path) if render_path is not None else "",
     }
+    if trace is not None:
+        trace.write("result", result=result, final_info=info)
+        trace.close()
+        result["trace_path"] = str(trace.path)
     connection.send({"type": "result", "result": result, "info": info})
     ack = connection.receive()
     if ack.get("type") != "ack":
@@ -259,7 +333,8 @@ def launch_adas_stack(stack: AdasStackSpec, host: str, port: int) -> subprocess.
 def run_experiment(args: argparse.Namespace) -> int:
     config = get_config()
     config["simulation"] = dict(config["simulation"])
-    config["simulation"]["render"] = False
+    if args.max_steps is not None:
+        config["simulation"]["max_episode_steps"] = args.max_steps
 
     selected_artifacts = (
         args.scenario_artifact
@@ -346,16 +421,22 @@ def run_experiment(args: argparse.Namespace) -> int:
                     live_render=args.render,
                     render_every=max(1, args.render_every),
                     save_render_dir=args.save_render_dir,
+                    trace_dir=args.trace_dir,
                 )
                 result["scenario_id"] = base_scenario.scenario_id
                 results.append(result)
-                status = "PASS" if result["success"] else "FAIL"
+                status = (
+                    "PASS" if result["success"]
+                    else "STUCK" if result["stuck"]
+                    else "FAIL"
+                )
                 print(
                     f"    {status} steps={result['steps']} path={result['path_len']} "
                     f"plan={result['plan_seconds']:.1f}s "
                     f"pos_err={result['position_error']:.3f}m "
                     f"heading_err={result['heading_error_deg']:.2f}deg "
-                    f"collision={result['collision_occurred']}",
+                    f"collision={result['collision_occurred']} "
+                    f"stuck={result['stuck']}",
                     flush=True,
                 )
                 print(
@@ -365,6 +446,8 @@ def run_experiment(args: argparse.Namespace) -> int:
                 )
                 if result["render_path"]:
                     print(f"    render={result['render_path']}", flush=True)
+                if result.get("trace_path"):
+                    print(f"    trace={result['trace_path']}", flush=True)
             print(flush=True)
 
         connection.send({"type": "shutdown"})
@@ -433,9 +516,21 @@ def parse_args() -> argparse.Namespace:
         help="Run every unoccupied slot in each selected scenario instead of its declared goal slot.",
     )
     parser.add_argument("--log-interval", type=int, default=0)
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=None,
+        help="Override the scenario's simulation step limit for a diagnostic run.",
+    )
     parser.add_argument("--render", action="store_true")
     parser.add_argument("--render-every", type=int, default=5)
     parser.add_argument("--save-render-dir", type=Path, default=None)
+    parser.add_argument(
+        "--trace-dir",
+        type=Path,
+        default=None,
+        help="Write JSONL state, command, trajectory, and result traces for each scenario slot.",
+    )
     return parser.parse_args()
 
 

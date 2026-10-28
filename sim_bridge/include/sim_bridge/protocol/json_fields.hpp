@@ -18,5 +18,9 @@ std::vector<double> find_number_array(
     const std::string& key,
     const std::vector<double>& fallback = {}
 );
+std::vector<std::vector<double>> find_number_arrays(const std::string& text, const std::string& key);
+
+std::string find_object(const std::string& text, const std::string& key);
+std::vector<std::string> find_object_array(const std::string& text, const std::string& key);
 
 }  // namespace sim_bridge

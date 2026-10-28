@@ -74,6 +74,7 @@ class AudiA5(Vehicle):
         self._FRONT_OVERHANG = 0.89  # Distance from front axle to front bumper (meters)
         self._REAR_OVERHANG = 0.96   # Distance from rear axle to rear bumper (meters)
         self.MAX_SPEED = 240.0 / 3.6  # Convert km/h to m/s
+        self.MAX_REVERSE_SPEED = 2.0
         self.MAX_STEERING_ANGLE = np.deg2rad(45); self.max_steer = self.MAX_STEERING_ANGLE
         self.MAX_STEERING_RATE = np.deg2rad(45)
         self.MAX_ACCELERATION = 9
@@ -124,7 +125,7 @@ class AudiA5(Vehicle):
         
         # Update velocity (allow negative for reversing)
         self.vx += acceleration * dt
-        self.vx = np.clip(self.vx, -self.MAX_SPEED, self.MAX_SPEED)
+        self.vx = np.clip(self.vx, -self.MAX_REVERSE_SPEED, self.MAX_SPEED)
         
         next_state = kinematic_bicycle_step(
             self.x,
