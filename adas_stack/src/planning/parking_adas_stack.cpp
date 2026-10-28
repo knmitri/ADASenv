@@ -1,266 +1,144 @@
 #include "parking_adas/stack/parking_adas_stack.hpp"
 
+#include <algorithm>
 #include <cmath>
-#include <string>
-#include <vector>
+#include <utility>
 
 #include "parking_adas/common/math.hpp"
-#include "parking_adas/planning/path_geometry.hpp"
+#include "parking_adas/planning/collision_checker.hpp"
 
 namespace parking_adas {
 
 std::vector<Waypoint> ParkingAdasStack::reset(const PlanRequest& request) {
+    request_ = request;
     vehicle_ = request.vehicle;
-    pose_controller_.set_vehicle(vehicle_);
-    goal_ = request.goal;
-    phase_ = 0;
-    phase_distance_ = 0.0;
 
-    if (std::abs(std::cos(goal_.yaw)) < 0.25) {
-        mode_ = Mode::Parallel;
-        pull_pose_ = parallel_pull_pose(goal_);
-        return parallel_visualization_path(
-            request.start_x,
-            request.start_y,
-            request.start_heading,
-            goal_,
-            pull_pose_
-        );
-    }
+    std::vector<Waypoint> planned_path = planner_.plan(request);
+    trajectory_ = generate_trajectory(std::move(planned_path));
 
-    if (std::abs(std::sin(goal_.yaw)) < 0.25) {
-        mode_ = Mode::Perpendicular;
-        target_pose_ = perpendicular_target_pose(goal_);
-        seam_pose_ = perpendicular_seam_pose(target_pose_);
-        return perpendicular_visualization_path(
-            request.start_x,
-            request.start_y,
-            request.start_heading,
-            target_pose_,
-            seam_pose_
-        );
-    }
-
-    mode_ = Mode::Pose;
-    return bezier_path(
-        request.start_x,
-        request.start_y,
-        goal_.x,
-        goal_.y,
-        request.start_heading,
-        goal_.yaw,
-        1,
-        32
-    );
+    trajectory_tracker_.reset(trajectory_, vehicle_);
+    return trajectory_;
 }
 
 MotionCommand ParkingAdasStack::command(const VehicleState& state) {
-    if (mode_ == Mode::Parallel) {
-        return parallel_command(state);
-    }
-    if (mode_ == Mode::Perpendicular) {
-        return perpendicular_command(state);
-    }
-    return pose_controller_.pose_command(state, goal_);
-}
+    if (trajectory_tracker_.needs_replan(
+            state,
+            request_.replan_position_threshold,
+            request_.replan_heading_threshold)) {
 
-Pose ParkingAdasStack::parallel_pull_pose(Pose goal) const {
-    Pose pose = goal;
-    pose = integrate_pose_by_distance(
-        pose,
-        vehicle_.max_steering_angle,
-        parallel_arc_distance_,
-        vehicle_.wheelbase
-    );
-    pose = integrate_pose_by_distance(
-        pose,
-        -vehicle_.max_steering_angle,
-        parallel_arc_distance_,
-        vehicle_.wheelbase
-    );
-    return pose;
-}
+        request_.start_x = state.x;
+        request_.start_y = state.y;
+        request_.start_heading = state.yaw;
 
-std::vector<Waypoint> ParkingAdasStack::parallel_visualization_path(
-    double start_x,
-    double start_y,
-    double start_heading,
-    Pose goal,
-    Pose pull_pose
-) const {
-    std::vector<Waypoint> path = bezier_path(
-        start_x,
-        start_y,
-        pull_pose.x,
-        pull_pose.y,
-        start_heading,
-        pull_pose.yaw,
-        1,
-        48
-    );
+        PlanRequest replanning_request = request_;
 
-    Pose pose = pull_pose;
-    for (const double steering : {-vehicle_.max_steering_angle, vehicle_.max_steering_angle}) {
-        for (int i = 0; i < 40; ++i) {
-            pose = integrate_pose_by_distance(
-                pose,
-                steering,
-                -parallel_arc_distance_ / 40.0,
-                vehicle_.wheelbase
-            );
-            path.push_back({pose.x, pose.y, -1, pose.yaw});
-        }
-    }
-    path.push_back({goal.x, goal.y, -1, goal.yaw});
-    return path;
-}
+        replanning_request.static_obstacles.insert(
+            replanning_request.static_obstacles.end(),
+            state.dynamic_obstacles.begin(),
+            state.dynamic_obstacles.end());
 
-Pose ParkingAdasStack::perpendicular_target_pose(Pose goal) const {
-    const double lateral_x = -std::sin(goal.yaw);
-    const double lateral_y = std::cos(goal.yaw);
-    return {
-        goal.x + perpendicular_lateral_bias_ * lateral_x,
-        goal.y + perpendicular_lateral_bias_ * lateral_y,
-        goal.yaw,
-    };
-}
+        std::vector<Waypoint> replacement =
+            generate_trajectory(planner_.plan(replanning_request));
 
-Pose ParkingAdasStack::perpendicular_seam_pose(Pose target) const {
-    return {
-        target.x + perpendicular_reverse_distance_ * std::cos(target.yaw),
-        target.y + perpendicular_reverse_distance_ * std::sin(target.yaw),
-        target.yaw,
-    };
-}
-
-std::vector<Waypoint> ParkingAdasStack::perpendicular_visualization_path(
-    double start_x,
-    double start_y,
-    double start_heading,
-    Pose target,
-    Pose seam
-) const {
-    std::vector<Waypoint> path = bezier_path(
-        start_x,
-        start_y,
-        seam.x,
-        seam.y,
-        start_heading,
-        seam.yaw,
-        1,
-        48
-    );
-    for (int i = 0; i < 16; ++i) {
-        const double t = static_cast<double>(i) / 15.0;
-        path.push_back({
-            seam.x + t * (target.x - seam.x),
-            seam.y + t * (target.y - seam.y),
-            -1,
-            target.yaw,
-        });
-    }
-    return path;
-}
-
-MotionCommand ParkingAdasStack::parallel_command(const VehicleState& state) {
-    if (phase_ == 0) {
-        const bool settled_at_pull =
-            std::hypot(state.x - pull_pose_.x, state.y - pull_pose_.y) < 0.35 &&
-            std::abs(normalize_angle(state.yaw - pull_pose_.yaw)) < 0.15 &&
-            std::abs(state.velocity) < 0.22;
-        if (settled_at_pull) {
-            phase_ = 1;
-            phase_distance_ = 0.0;
-        } else {
-            return pose_controller_.pose_command(state, pull_pose_);
+        if (!replacement.empty()) {
+            trajectory_ = std::move(replacement);
+            trajectory_tracker_.reset(trajectory_, vehicle_);
         }
     }
 
-    const std::vector<std::string> names = {
-        "pre_arc_in",
-        "arc_in",
-        "pre_counter_arc",
-        "counter_arc",
-    };
-    const std::vector<double> distances = {
-        0.0,
-        parallel_arc_distance_,
-        0.0,
-        parallel_arc_distance_,
-    };
-    const std::vector<double> steering = {
-        -vehicle_.max_steering_angle,
-        -vehicle_.max_steering_angle,
-        vehicle_.max_steering_angle,
-        vehicle_.max_steering_angle,
-    };
-    const std::vector<double> target_speeds = {0.0, -0.25, 0.0, -0.25};
+    const MotionCommand command = trajectory_tracker_.command(state);
 
-    if (phase_ >= 1 && phase_ <= static_cast<int>(names.size())) {
-        const int idx = phase_ - 1;
-        if (names.at(idx).find("pre_") == 0) {
-            const MotionCommand command = pose_controller_.stop_and_steer_command(state, steering.at(idx));
-            if (
-                std::abs(state.velocity) < 0.04 &&
-                std::abs(normalize_angle(state.steering_angle - steering.at(idx))) < 0.04
-            ) {
-                ++phase_;
-                phase_distance_ = 0.0;
+    PlanRequest safety_request = request_;
+
+    safety_request.static_obstacles.insert(
+        safety_request.static_obstacles.end(),
+        state.dynamic_obstacles.begin(),
+        state.dynamic_obstacles.end());
+
+    const CollisionChecker collision_checker(safety_request);
+
+    const double predicted_velocity =
+        state.velocity + command.acceleration * request_.dt;
+
+    const Pose predicted = integrate_pose_by_distance(
+        {state.x, state.y, state.yaw},
+        command.steering,
+        predicted_velocity * request_.dt,
+        vehicle_.wheelbase,
+        request_.dt);
+
+    if (collision_checker.is_collision(predicted)) {
+
+        safety_request.start_x = state.x;
+        safety_request.start_y = state.y;
+        safety_request.start_heading = state.yaw;
+
+        std::vector<Waypoint> replacement =
+            generate_trajectory(planner_.plan(safety_request));
+
+        if (!replacement.empty()) {
+            trajectory_ = std::move(replacement);
+            trajectory_tracker_.reset(trajectory_, vehicle_);
+
+            const MotionCommand replacement_command =
+                trajectory_tracker_.command(state);
+
+            const double replacement_velocity =
+                state.velocity +
+                replacement_command.acceleration * request_.dt;
+
+            const Pose replacement_pose =
+                integrate_pose_by_distance(
+                    {state.x, state.y, state.yaw},
+                    replacement_command.steering,
+                    replacement_velocity * request_.dt,
+                    vehicle_.wheelbase,
+                    request_.dt);
+
+            if (!collision_checker.is_collision(replacement_pose)) {
+                return replacement_command;
             }
-            return command;
         }
 
-        phase_distance_ += std::abs(state.velocity) * command_dt_;
-        if (phase_distance_ >= distances.at(idx)) {
-            ++phase_;
-            phase_distance_ = 0.0;
-        }
-        return {
-            clamp_value(1.3 * (target_speeds.at(idx) - state.velocity), -1.0, 1.0),
-            steering.at(idx),
-        };
+        const double braking =
+            state.velocity > 0.0
+                ? vehicle_.max_deceleration
+                : state.velocity < 0.0
+                    ? vehicle_.max_acceleration
+                    : 0.0;
+
+        return {braking, state.steering_angle};
     }
 
-    return pose_controller_.terminal_command(state, goal_);
+    return command;
 }
 
-MotionCommand ParkingAdasStack::perpendicular_command(const VehicleState& state) {
-    if (phase_ == 0) {
-        const bool settled_at_seam =
-            std::hypot(state.x - seam_pose_.x, state.y - seam_pose_.y) < 0.35 &&
-            std::abs(normalize_angle(state.yaw - seam_pose_.yaw)) < 0.15 &&
-            std::abs(state.velocity) < 0.22;
-        if (settled_at_seam) {
-            phase_ = 1;
-            phase_distance_ = 0.0;
-        } else {
-            return pose_controller_.pose_command(state, seam_pose_);
-        }
+std::vector<Waypoint> ParkingAdasStack::generate_trajectory(
+    std::vector<Waypoint> path) const {
+
+    if (path.size() < 2) {
+        return path;
     }
 
-    if (phase_ == 1) {
-        const MotionCommand command = pose_controller_.stop_and_steer_command(state, 0.0);
-        if (std::abs(state.velocity) < 0.04 && std::abs(state.steering_angle) < 0.04) {
-            phase_ = 2;
-            phase_distance_ = 0.0;
+    // Preserve the planner's collision-checked poses and curvatures. The tracker
+    // owns actuator-rate handling; altering geometry here would create a second,
+    // unvalidated trajectory.
+    constexpr double kForwardSpeed = 0.25;
+    constexpr double kReverseSpeed = 0.25;
+    for (std::size_t index = 0; index < path.size(); ++index) {
+        if (index > 0 && path[index].direction != path[index - 1].direction) {
+            path[index - 1].gear_change = true;
+            path[index - 1].target_speed = 0.0;
         }
-        return command;
-    }
-
-    if (phase_ == 2) {
-        phase_distance_ += std::abs(state.velocity) * command_dt_;
-        if (phase_distance_ >= perpendicular_reverse_distance_) {
-            phase_ = 3;
-            phase_distance_ = 0.0;
+        if (index + 1 == path.size()) {
+            path[index].target_speed = 0.0;
+        } else if (!path[index].gear_change) {
+            path[index].target_speed = path[index].direction < 0
+                ? -std::min(vehicle_.max_reverse_speed, kReverseSpeed)
+                : std::min(vehicle_.max_speed, kForwardSpeed);
         }
-        return {clamp_value(1.3 * (-0.25 - state.velocity), -1.0, 1.0), 0.0};
     }
-
-    const double distance_to_target = std::hypot(state.x - target_pose_.x, state.y - target_pose_.y);
-    if (distance_to_target < 0.45) {
-        return pose_controller_.terminal_command(state, target_pose_);
-    }
-    return pose_controller_.pose_command(state, target_pose_);
+    return path;
 }
 
 }  // namespace parking_adas

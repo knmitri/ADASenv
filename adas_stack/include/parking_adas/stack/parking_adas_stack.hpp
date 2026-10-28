@@ -2,8 +2,9 @@
 
 #include <vector>
 
-#include "parking_adas/control/pose_controller.hpp"
+#include "parking_adas/control/trajectory_tracker.hpp"
 #include "parking_adas/domain/types.hpp"
+#include "parking_adas/planning/hybrid_a_star.hpp"
 
 namespace parking_adas {
 
@@ -11,49 +12,17 @@ class ParkingAdasStack {
 public:
     std::vector<Waypoint> reset(const PlanRequest& request);
     MotionCommand command(const VehicleState& state);
+    const std::vector<Waypoint>& trajectory() const { return trajectory_; }
+    const PlanningDiagnostics& planning_diagnostics() const { return planner_.diagnostics(); }
 
 private:
-    enum class Mode {
-        Pose,
-        Parallel,
-        Perpendicular,
-    };
-
     VehicleParameters vehicle_;
-    PoseController pose_controller_;
-    Mode mode_ = Mode::Pose;
-    Pose goal_;
-    Pose pull_pose_;
-    Pose target_pose_;
-    Pose seam_pose_;
-    int phase_ = 0;
-    double phase_distance_ = 0.0;
-    double command_dt_ = 0.05;
-    double parallel_arc_distance_ = 4.6;
-    double perpendicular_reverse_distance_ = 2.4;
-    double perpendicular_lateral_bias_ = 0.2;
+    TrajectoryTracker trajectory_tracker_;
+    std::vector<Waypoint> trajectory_;
+    PlanRequest request_;
+    HybridAStarPlanner planner_;
+    std::vector<Waypoint> generate_trajectory(std::vector<Waypoint> path) const;
 
-    Pose parallel_pull_pose(Pose goal) const;
-    std::vector<Waypoint> parallel_visualization_path(
-        double start_x,
-        double start_y,
-        double start_heading,
-        Pose goal,
-        Pose pull_pose
-    ) const;
-
-    Pose perpendicular_target_pose(Pose goal) const;
-    Pose perpendicular_seam_pose(Pose target) const;
-    std::vector<Waypoint> perpendicular_visualization_path(
-        double start_x,
-        double start_y,
-        double start_heading,
-        Pose target,
-        Pose seam
-    ) const;
-
-    MotionCommand parallel_command(const VehicleState& state);
-    MotionCommand perpendicular_command(const VehicleState& state);
 };
 
 }  // namespace parking_adas
