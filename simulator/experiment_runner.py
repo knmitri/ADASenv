@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack
 import json
 from pathlib import Path
 import socket
@@ -40,8 +41,24 @@ class JsonLineConnection:
 
     def __init__(self, sock: socket.socket):
         self.sock = sock
-        self.reader = sock.makefile("r", encoding="utf-8", newline="\n")
-        self.writer = sock.makefile("w", encoding="utf-8", newline="\n")
+        reader = None
+        writer = None
+        try:
+            reader = sock.makefile("r", encoding="utf-8", newline="\n")
+            writer = sock.makefile("w", encoding="utf-8", newline="\n")
+        except BaseException:
+            try:
+                if writer is not None:
+                    writer.close()
+            finally:
+                try:
+                    if reader is not None:
+                        reader.close()
+                finally:
+                    sock.close()
+            raise
+        self.reader = reader
+        self.writer = writer
 
     def send(self, payload: dict[str, Any]) -> None:
         self.writer.write(json.dumps(to_jsonable(payload), separators=(",", ":")) + "\n")
@@ -57,9 +74,13 @@ class JsonLineConnection:
         return payload
 
     def close(self) -> None:
-        self.reader.close()
-        self.writer.close()
-        self.sock.close()
+        try:
+            self.reader.close()
+        finally:
+            try:
+                self.writer.close()
+            finally:
+                self.sock.close()
 
 
 def to_jsonable(value: Any) -> Any:
@@ -130,11 +151,42 @@ def run_remote_slot(
     save_render_dir: Path | None,
     trace_dir: Path | None,
 ) -> dict[str, Any]:
+    cleanup = ExitStack()
+    try:
+        return _run_remote_slot(
+            connection,
+            config,
+            scenario,
+            log_interval,
+            live_render,
+            render_every,
+            save_render_dir,
+            trace_dir,
+            cleanup,
+        )
+    finally:
+        cleanup.close()
+
+
+def _run_remote_slot(
+    connection: JsonLineConnection,
+    config: dict[str, Any],
+    scenario: ParkingScenario,
+    log_interval: int,
+    live_render: bool,
+    render_every: int,
+    save_render_dir: Path | None,
+    trace_dir: Path | None,
+    cleanup: ExitStack,
+) -> dict[str, Any]:
     vehicle = AudiA5()
     sim = ParkingSimulationEnvironment(vehicle=vehicle, config=config, scenario=scenario)
+    cleanup.callback(sim.close)
     sim.render_enabled = False
     state = sim.reset()
     visualizer = SimulationVisualizer(config.get("visualization")) if live_render or save_render_dir else None
+    if visualizer is not None:
+        cleanup.callback(visualizer.close)
     simulator_controller = SimulatorController.from_vehicle(vehicle)
     goal_pose = sim.get_goal_pose()
 
@@ -170,6 +222,8 @@ def run_remote_slot(
         },
     }
     trace = ExperimentTraceLogger(trace_dir, scenario) if trace_dir is not None else None
+    if trace is not None:
+        cleanup.callback(trace.close)
 
     plan_start = time.perf_counter()
     connection.send(reset_payload)
@@ -331,6 +385,23 @@ def launch_adas_stack(stack: AdasStackSpec, host: str, port: int) -> subprocess.
 
 
 def run_experiment(args: argparse.Namespace) -> int:
+    process_holder: list[subprocess.Popen | None] = [None]
+    socket_holder: list[socket.socket | None] = [None]
+    try:
+        return _run_experiment(args, process_holder, socket_holder)
+    finally:
+        try:
+            if socket_holder[0] is not None:
+                socket_holder[0].close()
+        finally:
+            _stop_stack_process(process_holder[0])
+
+
+def _run_experiment(
+    args: argparse.Namespace,
+    process_holder: list[subprocess.Popen | None],
+    socket_holder: list[socket.socket | None],
+) -> int:
     config = get_config()
     config["simulation"] = dict(config["simulation"])
     if args.max_steps is not None:
@@ -344,8 +415,6 @@ def run_experiment(args: argparse.Namespace) -> int:
     scenario_paths = [path.resolve() for path in selected_artifacts]
     base_scenarios = [load_parking_scenario(path) for path in scenario_paths]
     vehicle_for_fit = AudiA5()
-    stack_process: subprocess.Popen | None = None
-
     with socket.create_server((args.host, args.port), reuse_port=False) as server:
         actual_host, actual_port = server.getsockname()[:2]
         connect_host = args.connect_host or args.host
@@ -355,15 +424,17 @@ def run_experiment(args: argparse.Namespace) -> int:
         print(f"Listening for ADAS stack on {actual_host}:{actual_port}", flush=True)
         if not args.wait_for_external_stack:
             stack = get_adas_stack(args.adas_stack, args.adas_stack_catalog)
-            stack_process = launch_adas_stack(stack, connect_host, int(actual_port))
+            process_holder[0] = launch_adas_stack(stack, connect_host, int(actual_port))
 
         server.settimeout(args.accept_timeout)
         client_socket, address = server.accept()
+        socket_holder[0] = client_socket
 
-    print(f"ADAS stack connected from {address[0]}:{address[1]}", flush=True)
-    client_socket.settimeout(args.socket_timeout)
-    connection = JsonLineConnection(client_socket)
+    connection = None
     try:
+        print(f"ADAS stack connected from {address[0]}:{address[1]}", flush=True)
+        client_socket.settimeout(args.socket_timeout)
+        connection = JsonLineConnection(client_socket)
         connection.send(
             {
                 "type": "hello",
@@ -460,17 +531,23 @@ def run_experiment(args: argparse.Namespace) -> int:
         print(f"Summary: {passed}/{len(results)} slots passed", flush=True)
         return 0 if passed == len(results) else 1
     finally:
-        connection.close()
-        if stack_process is not None and stack_process.poll() is None:
-            try:
-                stack_process.wait(timeout=5.0)
-            except subprocess.TimeoutExpired:
-                stack_process.terminate()
-                try:
-                    stack_process.wait(timeout=2.0)
-                except subprocess.TimeoutExpired:
-                    stack_process.kill()
-                    stack_process.wait(timeout=2.0)
+        if connection is not None:
+            connection.close()
+
+
+def _stop_stack_process(process: subprocess.Popen | None) -> None:
+    if process is None or process.poll() is not None:
+        return
+
+    try:
+        process.wait(timeout=5.0)
+    except subprocess.TimeoutExpired:
+        process.terminate()
+        try:
+            process.wait(timeout=2.0)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
 
 
 def parse_args() -> argparse.Namespace:
