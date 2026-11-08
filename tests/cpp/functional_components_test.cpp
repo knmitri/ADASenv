@@ -280,13 +280,27 @@ void test_tracker_s_curve_divergence() {
 }
 
 void test_tracker_reverse_motion() {
+    const std::vector<parking_adas::Waypoint> curved_reverse_path{
+        {0.0, 0.0, -1, 0.0, -0.2, -0.25, false},
+        {-1.0, -0.1, -1, 0.1, -0.2, -0.25, false},
+        {-2.0, -0.3, -1, 0.2, -0.2, -0.25, false},
+        {-3.0, -0.6, -1, 0.3, -0.2, -0.25, false},
+        {-4.0, -1.0, -1, 0.4, -0.2, 0.0, false},
+    };
+    parking_adas::TrajectoryTracker curved_tracker;
+    parking_adas::VehicleParameters vehicle;
+    curved_tracker.reset(curved_reverse_path, vehicle);
+    const parking_adas::MotionCommand curved_command =
+        curved_tracker.command({0.0, 0.0, 0.0, 0.0, 0.0, {}});
+    require(curved_command.steering < 0.0,
+            "reverse tracker steered the wrong way for a left-curving reverse path");
+
     const std::vector<parking_adas::Waypoint> reverse_path{
         {2.0, 0.0, -1, 0.0, 0.0, -0.25, false},
         {1.0, 0.0, -1, 0.0, 0.0, -0.25, false},
         {0.0, 0.0, -1, 0.0, 0.0, 0.0, false},
     };
     parking_adas::TrajectoryTracker tracker;
-    parking_adas::VehicleParameters vehicle;
     tracker.reset(reverse_path, vehicle);
 
     parking_adas::VehicleState state{2.0, 0.0, 0.0, 0.0, 0.0, {}};

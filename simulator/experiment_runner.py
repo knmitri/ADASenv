@@ -164,7 +164,7 @@ def run_remote_slot(
             "world_min_y": float(sim.world_min_y),
             "world_max_x": float(scenario.lot.lot_width),
             "world_max_y": float(scenario.lot.lot_length),
-            "replan_position_threshold": 0.75,
+            "replan_position_threshold": 1.5,
             "replan_heading_threshold": 0.35,
             "goal_heading_tolerance": float(config["simulation"]["goal_heading_tolerance"]),
         },
