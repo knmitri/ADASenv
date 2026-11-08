@@ -196,6 +196,12 @@ The core parallel challenge is:
 Its target is slot 3, with parked cars in slots 2 and 4. The 6.0 m bay leaves
 0.665 m longitudinal clearance at each end around the 4.67 m reference vehicle.
 
+Regenerate the checked-in smoke and benchmark catalogs with:
+
+```bash
+python scripts/generate_scenario_catalog.py
+```
+
 Generate a new baseline artifact with:
 
 ```bash

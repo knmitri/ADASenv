@@ -1,0 +1,21 @@
+{
+  "goal_slot_index": 0,
+  "objects": [],
+  "parking_lot": {
+    "aisle_width": 6.0,
+    "cols": 1,
+    "gap_between_slots": 0.0,
+    "layout": "single_side",
+    "lot_length": 15.0,
+    "lot_width": 15.0,
+    "origin_x": 10.0,
+    "origin_y": 0.0,
+    "rows": 6,
+    "slot_length": 5.0,
+    "slot_orientation_deg": 90.0,
+    "slot_orientation_rad": 1.5707963267948966,
+    "slot_width": 2.5
+  },
+  "scenario_id": "empty_perpendicular",
+  "type": "parking"
+}

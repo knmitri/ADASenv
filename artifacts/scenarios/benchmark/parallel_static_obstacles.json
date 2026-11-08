@@ -1,0 +1,72 @@
+{
+  "goal_slot_index": 2,
+  "objects": [
+    {
+      "heading": 1.5707963267948966,
+      "length": 4.67,
+      "object_id": "parked_car_0",
+      "object_type": "parked_vehicle",
+      "slot_index": 0,
+      "width": 1.86,
+      "x": 11.25,
+      "y": 3.0
+    },
+    {
+      "heading": 1.5707963267948966,
+      "length": 4.67,
+      "object_id": "parked_car_1",
+      "object_type": "parked_vehicle",
+      "slot_index": 1,
+      "width": 1.86,
+      "x": 11.25,
+      "y": 9.0
+    },
+    {
+      "heading": 1.5707963267948966,
+      "length": 4.67,
+      "object_id": "parked_car_3",
+      "object_type": "parked_vehicle",
+      "slot_index": 3,
+      "width": 1.86,
+      "x": 11.25,
+      "y": 21.0
+    },
+    {
+      "heading": 1.5707963267948966,
+      "length": 4.67,
+      "object_id": "parked_car_4",
+      "object_type": "parked_vehicle",
+      "slot_index": 4,
+      "width": 1.86,
+      "x": 11.25,
+      "y": 27.0
+    },
+    {
+      "heading": 1.5707963267948966,
+      "length": 4.67,
+      "object_id": "parked_car_5",
+      "object_type": "parked_vehicle",
+      "slot_index": 5,
+      "width": 1.86,
+      "x": 11.25,
+      "y": 33.0
+    }
+  ],
+  "parking_lot": {
+    "aisle_width": 6.0,
+    "cols": 1,
+    "gap_between_slots": 0.0,
+    "layout": "single_side",
+    "lot_length": 36.0,
+    "lot_width": 12.5,
+    "origin_x": 10.0,
+    "origin_y": 0.0,
+    "rows": 6,
+    "slot_length": 6.0,
+    "slot_orientation_deg": 0.0,
+    "slot_orientation_rad": 0.0,
+    "slot_width": 2.5
+  },
+  "scenario_id": "parallel_static_obstacles",
+  "type": "parking"
+}

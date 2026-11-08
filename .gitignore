@@ -9,4 +9,12 @@ __pycache__/
 venv/
 dist/
 build/
-artifacts/
+artifacts/*
+!artifacts/scenarios/
+artifacts/scenarios/*
+!artifacts/scenarios/smoke/
+artifacts/scenarios/smoke/*
+!artifacts/scenarios/smoke/*.json
+!artifacts/scenarios/benchmark/
+artifacts/scenarios/benchmark/*
+!artifacts/scenarios/benchmark/*.json
