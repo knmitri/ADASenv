@@ -1,5 +1,7 @@
 #include "sim_bridge/transport/tcp_client.hpp"
 
+#include <algorithm>
+#include <array>
 #include <stdexcept>
 
 #ifdef _WIN32
@@ -13,7 +15,11 @@
 
 namespace sim_bridge {
 
-TcpClient::TcpClient() {
+TcpClient::TcpClient(std::size_t max_frame_size)
+    : max_frame_size_(max_frame_size) {
+    if (max_frame_size_ == 0) {
+        throw std::invalid_argument("maximum TCP frame size must be greater than zero");
+    }
 #ifdef _WIN32
     WSADATA data;
     const int rc = WSAStartup(MAKEWORD(2, 2), &data);
@@ -57,34 +63,61 @@ void TcpClient::connect_to(const std::string& host, const std::string& port) {
 }
 
 void TcpClient::write_line(const std::string& line) {
+    if (line.size() > max_frame_size_) {
+        throw std::length_error("outgoing TCP frame exceeds configured maximum size");
+    }
+    if (line.find('\n') != std::string::npos) {
+        throw std::invalid_argument("TCP frame must not contain an unescaped newline");
+    }
     const std::string payload = line + "\n";
     const char* cursor = payload.c_str();
-    int remaining = static_cast<int>(payload.size());
+    std::size_t remaining = payload.size();
     while (remaining > 0) {
-        const int sent = static_cast<int>(::send(socket_, cursor, remaining, 0));
+        const auto chunk_size = std::min<std::size_t>(remaining, 4096);
+        const int sent = static_cast<int>(
+            ::send(socket_, cursor, static_cast<int>(chunk_size), 0)
+        );
         if (sent <= 0) {
             throw std::runtime_error("socket send failed");
         }
         cursor += sent;
-        remaining -= sent;
+        remaining -= static_cast<std::size_t>(sent);
     }
 }
 
 bool TcpClient::read_line(std::string& line) {
     line.clear();
-    char ch = '\0';
     while (true) {
-        const int received = static_cast<int>(::recv(socket_, &ch, 1, 0));
+        const std::size_t delimiter = read_buffer_.find('\n');
+        if (delimiter != std::string::npos) {
+            if (delimiter > max_frame_size_) {
+                throw std::length_error("incoming TCP frame exceeds configured maximum size");
+            }
+            line.assign(read_buffer_, 0, delimiter);
+            read_buffer_.erase(0, delimiter + 1);
+            return true;
+        }
+        if (read_buffer_.size() > max_frame_size_) {
+            throw std::length_error("incoming TCP frame exceeds configured maximum size");
+        }
+
+        std::array<char, 4096> buffer{};
+        const int received = static_cast<int>(::recv(
+            socket_,
+            buffer.data(),
+            static_cast<int>(buffer.size()),
+            0
+        ));
         if (received == 0) {
-            return !line.empty();
+            if (read_buffer_.empty()) {
+                return false;
+            }
+            throw std::runtime_error("connection closed before TCP frame was complete");
         }
         if (received < 0) {
             throw std::runtime_error("socket receive failed");
         }
-        if (ch == '\n') {
-            return true;
-        }
-        line.push_back(ch);
+        read_buffer_.append(buffer.data(), static_cast<std::size_t>(received));
     }
 }
 

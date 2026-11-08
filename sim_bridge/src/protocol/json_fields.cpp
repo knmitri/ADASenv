@@ -1,153 +1,173 @@
 #include "sim_bridge/protocol/json_fields.hpp"
 
-#include <cstdlib>
-
-namespace {
-
-std::size_t matching_delimiter(const std::string& text, std::size_t open, char left, char right) {
-    int depth = 0;
-    for (std::size_t index = open; index < text.size(); ++index) {
-        if (text[index] == left) { ++depth; }
-        if (text[index] == right && --depth == 0) { return index; }
-    }
-    return std::string::npos;
-}
-
-}  // namespace
+#include <cmath>
+#include <stdexcept>
 
 namespace sim_bridge {
 
-std::string find_string(
-    const std::string& text,
-    const std::string& key,
-    const std::string& fallback
-) {
-    const std::string pattern = "\"" + key + "\"";
-    const std::size_t key_pos = text.find(pattern);
-    if (key_pos == std::string::npos) {
-        return fallback;
-    }
-    const std::size_t colon = text.find(':', key_pos + pattern.size());
-    if (colon == std::string::npos) {
-        return fallback;
-    }
-    const std::size_t first_quote = text.find('"', colon + 1);
-    if (first_quote == std::string::npos) {
-        return fallback;
-    }
-    const std::size_t second_quote = text.find('"', first_quote + 1);
-    if (second_quote == std::string::npos) {
-        return fallback;
-    }
-    return text.substr(first_quote + 1, second_quote - first_quote - 1);
-}
+namespace {
 
-double find_number(const std::string& text, const std::string& key, double fallback) {
-    const std::string pattern = "\"" + key + "\"";
-    const std::size_t key_pos = text.find(pattern);
-    if (key_pos == std::string::npos) {
-        return fallback;
-    }
-    const std::size_t colon = text.find(':', key_pos + pattern.size());
-    if (colon == std::string::npos) {
-        return fallback;
-    }
-    const char* begin = text.c_str() + colon + 1;
-    char* end = nullptr;
-    const double value = std::strtod(begin, &end);
-    if (end == begin) {
-        return fallback;
+const Json& require_object(const Json& value, const std::string& path) {
+    if (!value.is_object()) {
+        throw std::invalid_argument(path + " must be a JSON object");
     }
     return value;
 }
 
-std::vector<double> find_number_array(
-    const std::string& text,
-    const std::string& key,
-    const std::vector<double>& fallback
+std::string field_path(const std::string& path, const std::string& key) {
+    return path.empty() ? key : path + "." + key;
+}
+
+const Json& required_field(const Json& object, const std::string& key, const std::string& path) {
+    require_object(object, path.empty() ? "request" : path);
+    const auto found = object.find(key);
+    if (found == object.end()) {
+        throw std::invalid_argument("Missing required field '" + field_path(path, key) + "'");
+    }
+    return *found;
+}
+
+double number_value(const Json& value, const std::string& path) {
+    if (!value.is_number()) {
+        throw std::invalid_argument(path + " must be a number");
+    }
+    const double number = value.get<double>();
+    if (!std::isfinite(number)) {
+        throw std::invalid_argument(path + " must be finite");
+    }
+    return number;
+}
+
+std::vector<double> number_array(
+    const Json& value,
+    const std::string& path,
+    std::size_t minimum_size
 ) {
-    const std::string pattern = "\"" + key + "\"";
-    const std::size_t key_pos = text.find(pattern);
-    if (key_pos == std::string::npos) {
-        return fallback;
+    if (!value.is_array()) {
+        throw std::invalid_argument(path + " must be an array");
     }
-    const std::size_t open = text.find('[', key_pos + pattern.size());
-    if (open == std::string::npos) {
-        return fallback;
+    if (value.size() < minimum_size) {
+        throw std::invalid_argument(
+            path + " must contain at least " + std::to_string(minimum_size) + " values"
+        );
     }
-    const std::size_t close = text.find(']', open + 1);
-    if (close == std::string::npos) {
-        return fallback;
+    std::vector<double> numbers;
+    numbers.reserve(value.size());
+    for (std::size_t index = 0; index < value.size(); ++index) {
+        numbers.push_back(number_value(value[index], path + "[" + std::to_string(index) + "]"));
     }
-
-    std::vector<double> values;
-    const char* cursor = text.c_str() + open + 1;
-    const char* stop = text.c_str() + close;
-    while (cursor < stop) {
-        char* end = nullptr;
-        const double value = std::strtod(cursor, &end);
-        if (end != cursor) {
-            values.push_back(value);
-            cursor = end;
-        } else {
-            ++cursor;
-        }
-    }
-    return values.empty() ? fallback : values;
+    return numbers;
 }
 
-std::vector<std::vector<double>> find_number_arrays(const std::string& text, const std::string& key) {
-    const std::size_t key_pos = text.find("\"" + key + "\"");
-    if (key_pos == std::string::npos) return {};
-    const std::size_t open = text.find('[', key_pos);
-    const std::size_t close = open == std::string::npos ? std::string::npos : matching_delimiter(text, open, '[', ']');
-    if (close == std::string::npos) return {};
-    std::vector<std::vector<double>> result;
-    for (std::size_t index = open + 1; index < close;) {
-        const std::size_t row_open = text.find('[', index);
-        if (row_open == std::string::npos || row_open >= close) break;
-        const std::size_t row_close = matching_delimiter(text, row_open, '[', ']');
-        if (row_close == std::string::npos || row_close > close) break;
-        std::vector<double> row;
-        const char* cursor = text.c_str() + row_open + 1;
-        const char* stop = text.c_str() + row_close;
-        while (cursor < stop) {
-            char* end = nullptr;
-            const double value = std::strtod(cursor, &end);
-            if (end != cursor) { row.push_back(value); cursor = end; } else { ++cursor; }
-        }
-        result.push_back(row);
-        index = row_close + 1;
+}  // namespace
+
+Json parse_json_object(const std::string& text, const std::string& context) {
+    Json value;
+    try {
+        value = Json::parse(text);
+    } catch (const Json::parse_error& error) {
+        throw std::invalid_argument("Malformed JSON in " + context + ": " + error.what());
     }
-    return result;
+    require_object(value, context);
+    return value;
 }
 
-std::string find_object(const std::string& text, const std::string& key) {
-    const std::size_t key_pos = text.find("\"" + key + "\"");
-    if (key_pos == std::string::npos) { return {}; }
-    const std::size_t open = text.find('{', key_pos);
-    if (open == std::string::npos) { return {}; }
-    const std::size_t close = matching_delimiter(text, open, '{', '}');
-    return close == std::string::npos ? std::string{} : text.substr(open, close - open + 1);
+Json optional_object_field(const Json& object, const std::string& key, const std::string& path) {
+    const Json& parent = require_object(object, path.empty() ? "request" : path);
+    const auto found = parent.find(key);
+    if (found == parent.end()) {
+        return Json::object();
+    }
+    if (!found->is_object()) {
+        throw std::invalid_argument(field_path(path, key) + " must be a JSON object");
+    }
+    return *found;
 }
 
-std::vector<std::string> find_object_array(const std::string& text, const std::string& key) {
-    std::vector<std::string> objects;
-    const std::size_t key_pos = text.find("\"" + key + "\"");
-    if (key_pos == std::string::npos) { return objects; }
-    const std::size_t open = text.find('[', key_pos);
-    if (open == std::string::npos) { return objects; }
-    const std::size_t close = matching_delimiter(text, open, '[', ']');
-    if (close == std::string::npos) { return objects; }
-    for (std::size_t index = open + 1; index < close;) {
-        const std::size_t object_open = text.find('{', index);
-        if (object_open == std::string::npos || object_open >= close) { break; }
-        const std::size_t object_close = matching_delimiter(text, object_open, '{', '}');
-        if (object_close == std::string::npos) { break; }
-        objects.push_back(text.substr(object_open, object_close - object_open + 1));
-        index = object_close + 1;
+Json optional_array_field(const Json& object, const std::string& key, const std::string& path) {
+    const Json& parent = require_object(object, path.empty() ? "request" : path);
+    const auto found = parent.find(key);
+    if (found == parent.end()) {
+        return Json::array();
     }
-    return objects;
+    if (!found->is_array()) {
+        throw std::invalid_argument(field_path(path, key) + " must be an array");
+    }
+    return *found;
+}
+
+std::string required_string_field(
+    const Json& object,
+    const std::string& key,
+    const std::string& path
+) {
+    const Json& value = required_field(object, key, path);
+    if (!value.is_string()) {
+        throw std::invalid_argument(field_path(path, key) + " must be a string");
+    }
+    return value.get<std::string>();
+}
+
+double required_number_field(
+    const Json& object,
+    const std::string& key,
+    const std::string& path
+) {
+    return number_value(required_field(object, key, path), field_path(path, key));
+}
+
+double optional_number_field(
+    const Json& object,
+    const std::string& key,
+    const std::string& path,
+    double fallback
+) {
+    const Json& parent = require_object(object, path.empty() ? "request" : path);
+    const auto found = parent.find(key);
+    return found == parent.end()
+        ? fallback
+        : number_value(*found, field_path(path, key));
+}
+
+std::vector<double> required_number_array_field(
+    const Json& object,
+    const std::string& key,
+    const std::string& path,
+    std::size_t minimum_size
+) {
+    return number_array(
+        required_field(object, key, path),
+        field_path(path, key),
+        minimum_size
+    );
+}
+
+std::vector<std::vector<double>> optional_number_arrays_field(
+    const Json& object,
+    const std::string& key,
+    const std::string& path,
+    std::size_t row_minimum_size
+) {
+    const Json& parent = require_object(object, path.empty() ? "request" : path);
+    const auto found = parent.find(key);
+    if (found == parent.end()) {
+        return {};
+    }
+    const std::string array_path = field_path(path, key);
+    if (!found->is_array()) {
+        throw std::invalid_argument(array_path + " must be an array");
+    }
+
+    std::vector<std::vector<double>> rows;
+    rows.reserve(found->size());
+    for (std::size_t index = 0; index < found->size(); ++index) {
+        rows.push_back(number_array(
+            (*found)[index],
+            array_path + "[" + std::to_string(index) + "]",
+            row_minimum_size
+        ));
+    }
+    return rows;
 }
 
 }  // namespace sim_bridge

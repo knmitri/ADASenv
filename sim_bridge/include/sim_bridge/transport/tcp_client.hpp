@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <string>
 
 #ifdef _WIN32
@@ -22,7 +23,9 @@ namespace sim_bridge {
 
 class TcpClient {
 public:
-    TcpClient();
+    static constexpr std::size_t kDefaultMaxFrameSize = 1024 * 1024;
+
+    explicit TcpClient(std::size_t max_frame_size = kDefaultMaxFrameSize);
     ~TcpClient();
 
     TcpClient(const TcpClient&) = delete;
@@ -34,6 +37,8 @@ public:
 
 private:
     SocketHandle socket_ = kInvalidSocket;
+    const std::size_t max_frame_size_;
+    std::string read_buffer_;
 
     void close_socket();
 };

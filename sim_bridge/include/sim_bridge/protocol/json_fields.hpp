@@ -1,26 +1,46 @@
 #pragma once
 
+#include <cstddef>
 #include <string>
 #include <vector>
 
+#include <nlohmann/json.hpp>
+
 namespace sim_bridge {
 
-std::string find_string(
-    const std::string& text,
+using Json = nlohmann::json;
+
+Json parse_json_object(const std::string& text, const std::string& context);
+Json optional_object_field(const Json& object, const std::string& key, const std::string& path);
+Json optional_array_field(const Json& object, const std::string& key, const std::string& path);
+
+std::string required_string_field(
+    const Json& object,
     const std::string& key,
-    const std::string& fallback = ""
+    const std::string& path
 );
-
-double find_number(const std::string& text, const std::string& key, double fallback = 0.0);
-
-std::vector<double> find_number_array(
-    const std::string& text,
+double required_number_field(
+    const Json& object,
     const std::string& key,
-    const std::vector<double>& fallback = {}
+    const std::string& path
 );
-std::vector<std::vector<double>> find_number_arrays(const std::string& text, const std::string& key);
-
-std::string find_object(const std::string& text, const std::string& key);
-std::vector<std::string> find_object_array(const std::string& text, const std::string& key);
+double optional_number_field(
+    const Json& object,
+    const std::string& key,
+    const std::string& path,
+    double fallback
+);
+std::vector<double> required_number_array_field(
+    const Json& object,
+    const std::string& key,
+    const std::string& path,
+    std::size_t minimum_size
+);
+std::vector<std::vector<double>> optional_number_arrays_field(
+    const Json& object,
+    const std::string& key,
+    const std::string& path,
+    std::size_t row_minimum_size
+);
 
 }  // namespace sim_bridge

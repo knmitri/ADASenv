@@ -1,6 +1,8 @@
+#include <charconv>
 #include <exception>
 #include <iostream>
 #include <string>
+#include <system_error>
 
 #include "parking_adas/stack/parking_adas_stack.hpp"
 #include "sim_bridge/cli.hpp"
@@ -12,13 +14,30 @@ namespace sim_bridge {
 int run_tcp_client(int argc, char** argv) {
     const std::string host = arg_value(argc, argv, "--host", "127.0.0.1");
     const std::string port = arg_value(argc, argv, "--port", "8765");
+    const std::string frame_size_arg = arg_value(
+        argc,
+        argv,
+        "--max-frame-size",
+        std::to_string(TcpClient::kDefaultMaxFrameSize)
+    );
+    std::size_t max_frame_size = 0;
+    const auto frame_size_result = std::from_chars(
+        frame_size_arg.data(),
+        frame_size_arg.data() + frame_size_arg.size(),
+        max_frame_size
+    );
+    if (frame_size_result.ec != std::errc{} ||
+        frame_size_result.ptr != frame_size_arg.data() + frame_size_arg.size() ||
+        max_frame_size == 0) {
+        throw std::invalid_argument("--max-frame-size must be a positive integer");
+    }
     const std::string planner_id = arg_value(argc, argv, "--path-planner", "hybrid_astar");
     const std::string tracker_id = arg_value(argc, argv, "--trajectory-tracker", "pure_pursuit");
 
     parking_adas::ParkingAdasStack stack(
         parking_adas::make_path_planner(planner_id),
         parking_adas::make_trajectory_tracker(tracker_id));
-    TcpClient client;
+    TcpClient client(max_frame_size);
     client.connect_to(host, port);
 
     std::string line;

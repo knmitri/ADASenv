@@ -31,9 +31,22 @@ waypoints through faithfully.
 | --- | --- |
 | `src/app/main.cpp` | Process entry point and message dispatcher. Owns a `ParkingAdasStack` for the session. |
 | `cli.*` | Parses bridge process options such as TCP host and port. |
-| `transport/tcp_client.*` | Connects, reads, and writes newline-delimited transport frames. |
-| `protocol/json_fields.*` | Minimal dependency-free JSON field reading utilities. |
-| `protocol/simulator_protocol.*` | Converts reset and vehicle-state messages to ADAS types; serializes acknowledgements, diagnostics, path updates, and commands. |
+| `transport/tcp_client.*` | Connects, reads, and writes newline-delimited transport frames with bounded buffering. |
+| `protocol/json_fields.*` | Parses JSON and validates field presence and types using nlohmann/json. |
+| `protocol/simulator_protocol.*` | Converts validated reset and vehicle-state messages to ADAS types and serializes responses as JSON. |
+
+The bridge uses the header-only nlohmann/json 3.11.3 library. CMake prefers an
+installed package and otherwise fetches the version-pinned source archive with a
+SHA-256 check. The TCP frame limit defaults to 1 MiB and can be changed with
+`--max-frame-size <bytes>`; the limit applies to both received and sent frames,
+excluding the terminating newline.
+
+Reset messages require `start`, `start_heading`, and either `goal` or
+`goal_pose`. State messages require `position`, `heading`, and `velocity`, in
+the top-level object or the nested `state` object emitted by the simulator.
+Vehicle and simulation configuration fields remain optional and retain their
+domain defaults when omitted. If a field is present with the wrong JSON type,
+or a required value is missing, parsing returns an explicit error.
 
 ## Message Lifecycle
 
@@ -65,6 +78,12 @@ sequenceDiagram
    second squared.
 4. Do not recreate planner-derived paths or apply control-law changes here.
 5. Add a narrow C++ protocol test and run an end-to-end experiment trace.
+
+Outgoing response strings are serialized by the JSON library, so error text and
+diagnostic strings are escaped as required by JSON. TCP reads use chunked socket
+I/O while retaining any bytes beyond the current newline for the next frame.
+EOF with no buffered bytes is a normal disconnect; EOF with a partial frame and
+frames above the configured limit are explicit transport errors.
 
 The bridge is a replaceable adapter. A future ECU, ROS, or vehicle middleware
 adapter should map the same ADAS domain contract without inheriting TCP/JSON

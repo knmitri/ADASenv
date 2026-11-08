@@ -2,7 +2,12 @@ cmake_minimum_required(VERSION 3.16)
 
 project(ADASEnvironment LANGUAGES CXX)
 
+if(POLICY CMP0135)
+  cmake_policy(SET CMP0135 NEW)
+endif()
+
 enable_testing()
+find_package(Threads REQUIRED)
 
 option(
   ADAS_REEDS_SHEPP_DEFAULT_ANALYTICAL
@@ -14,6 +19,17 @@ option(
   "Build analytical Reeds-Shepp distance comparisons against installed OMPL"
   OFF
 )
+
+find_package(nlohmann_json 3.11.3 CONFIG QUIET)
+if(NOT TARGET nlohmann_json::nlohmann_json)
+  include(FetchContent)
+  FetchContent_Declare(
+    nlohmann_json
+    URL https://github.com/nlohmann/json/archive/refs/tags/v3.11.3.zip
+    URL_HASH SHA256=04022B05D806EB5FF73023C280B68697D12B93E1B7267A0B22A1A39EC7578069
+  )
+  FetchContent_MakeAvailable(nlohmann_json)
+endif()
 
 add_library(parking_motion_api INTERFACE)
 target_include_directories(parking_motion_api INTERFACE motion_api/include)
@@ -60,7 +76,10 @@ target_include_directories(
   tcp_json_sim_bridge
   PRIVATE sim_bridge/include
 )
-target_link_libraries(tcp_json_sim_bridge PRIVATE reference_parking_stack)
+target_link_libraries(
+  tcp_json_sim_bridge
+  PRIVATE reference_parking_stack nlohmann_json::nlohmann_json
+)
 target_compile_features(tcp_json_sim_bridge PRIVATE cxx_std_17)
 
 add_executable(model_parity_test tests/cpp/model_parity_test.cpp)
@@ -75,7 +94,10 @@ add_executable(
   sim_bridge/src/protocol/simulator_protocol.cpp
 )
 target_include_directories(functional_components_test PRIVATE sim_bridge/include)
-target_link_libraries(functional_components_test PRIVATE reference_parking_stack)
+target_link_libraries(
+  functional_components_test
+  PRIVATE reference_parking_stack nlohmann_json::nlohmann_json
+)
 target_compile_features(functional_components_test PRIVATE cxx_std_17)
 add_test(NAME functional_components_test COMMAND functional_components_test)
 
@@ -86,6 +108,34 @@ add_executable(
 target_link_libraries(reeds_shepp_verification_test PRIVATE reference_parking_stack)
 target_compile_features(reeds_shepp_verification_test PRIVATE cxx_std_17)
 add_test(NAME reeds_shepp_verification_test COMMAND reeds_shepp_verification_test)
+
+add_executable(
+  bridge_protocol_test
+  tests/cpp/bridge_protocol_test.cpp
+  sim_bridge/src/protocol/json_fields.cpp
+  sim_bridge/src/protocol/simulator_protocol.cpp
+)
+target_include_directories(bridge_protocol_test PRIVATE sim_bridge/include)
+target_link_libraries(
+  bridge_protocol_test
+  PRIVATE reference_parking_stack nlohmann_json::nlohmann_json
+)
+target_compile_features(bridge_protocol_test PRIVATE cxx_std_17)
+add_test(NAME bridge_protocol_test COMMAND bridge_protocol_test)
+
+add_executable(
+  tcp_client_framing_test
+  tests/cpp/tcp_client_framing_test.cpp
+  sim_bridge/src/transport/tcp_client.cpp
+)
+target_include_directories(tcp_client_framing_test PRIVATE sim_bridge/include)
+target_compile_features(tcp_client_framing_test PRIVATE cxx_std_17)
+if(WIN32)
+  target_link_libraries(tcp_client_framing_test PRIVATE Ws2_32 Threads::Threads)
+  else()
+    target_link_libraries(tcp_client_framing_test PRIVATE Threads::Threads)
+  endif()
+add_test(NAME tcp_client_framing_test COMMAND tcp_client_framing_test)
 
 if(ADAS_ENABLE_OMPL_REFERENCE_TESTS)
   find_package(ompl CONFIG REQUIRED)
@@ -114,7 +164,16 @@ if(WIN32)
   target_link_libraries(tcp_json_sim_bridge PRIVATE Ws2_32)
 endif()
 
-set(build_targets reference_parking_stack tcp_json_sim_bridge model_parity_test functional_components_test reeds_shepp_verification_test)
+set(
+  build_targets
+  reference_parking_stack
+  tcp_json_sim_bridge
+  model_parity_test
+  functional_components_test
+  reeds_shepp_verification_test
+  bridge_protocol_test
+  tcp_client_framing_test
+)
 if(ADAS_ENABLE_OMPL_REFERENCE_TESTS)
   list(APPEND build_targets reeds_shepp_ompl_reference_test)
 endif()
