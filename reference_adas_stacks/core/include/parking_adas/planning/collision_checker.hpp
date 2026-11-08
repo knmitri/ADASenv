@@ -4,7 +4,7 @@
 #include <cstdint>
 #include <vector>
 
-#include "parking_adas/common/footprint_geometry.hpp"
+#include "parking_adas/planning/collision_scene.hpp"
 #include "parking_adas/domain/types.hpp"
 
 namespace parking_adas {
@@ -17,7 +17,9 @@ public:
         std::uint64_t obstacle_distance_checks = 0;
     };
 
-    CollisionChecker(const PlanRequest& request, double clearance = 0.1);
+    // Copies the immutable scene handle; the checker remains valid independently
+    // of the caller's CollisionScene object.
+    explicit CollisionChecker(const CollisionScene& scene);
     bool is_collision(const Pose& pose) const;
     bool is_swept_collision(const Pose& from, const Pose& to,
                             double translation_bound,
@@ -26,10 +28,7 @@ public:
     void reset_statistics() const;
 
 private:
-    PlanRequest request_;
-    double clearance_;
-    std::vector<Polygon> obstacle_polygons_;
-    bool invalid_geometry_ = false;
+    CollisionScene scene_;
     mutable std::atomic<std::uint64_t> pose_checks_{0};
     mutable std::atomic<std::uint64_t> swept_checks_{0};
     mutable std::atomic<std::uint64_t> obstacle_distance_checks_{0};

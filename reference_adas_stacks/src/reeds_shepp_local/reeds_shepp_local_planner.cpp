@@ -15,7 +15,8 @@ std::vector<Waypoint> ReedsSheppLocalPlanner::plan(const PlanRequest& request) {
     diagnostics_.closest_goal_distance = std::hypot(
         request.goal.x - request.start_x, request.goal.y - request.start_y);
 
-    const CollisionChecker collision_checker(request);
+    const CollisionScene collision_scene(request);
+    const CollisionChecker collision_checker(collision_scene);
     const ParkingGoalEvaluator goal_evaluator(request);
     const ReedsSheppConnector connector;
     std::vector<Waypoint> connection;

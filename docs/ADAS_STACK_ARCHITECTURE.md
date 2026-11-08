@@ -28,7 +28,8 @@ acceleration in m/s^2 and front mid-axle steering angle in radians.
 | Domain | `domain/types.hpp` | Vehicle-neutral data: poses, waypoints, requests, obstacles, diagnostics, and commands. A `Waypoint` is the one motion artifact shared by planning, tracking, and external adapters. |
 | Common | `common/math.*` | Angle, clamp, and kinematic-bicycle integration helpers. |
 | Common | `common/footprint_geometry.*` | Vehicle and obstacle footprints plus convex-polygon operations. It is shared so collision and goal semantics cannot drift. |
-| Planning | `planning/collision_checker.*` | Safety only: bounds and inflated-footprint collision checks. |
+| Planning | `planning/collision_scene.*` | Builds and validates an immutable snapshot of vehicle geometry, world bounds, clearance, and static obstacle polygons from a `PlanRequest`. |
+| Planning | `planning/collision_checker.*` | Safety queries only: point and swept collision checks against a shared `CollisionScene`. |
 | Planning | `planning/parking_goal_evaluator.*` | Completion only: whole uninflated vehicle must be inside the goal slot and within its heading tolerance. |
 | Planning | `planning/path_planner.*` | `PathPlanner` interface and planner factory. The stack depends on this abstraction, not on a search algorithm. |
 | Planning | `planning/hybrid_a_star.*` | `hybrid_astar`: forward/reverse kinematic search, collision-safe expansion, and the provisional-prefix fallback. |
@@ -45,7 +46,8 @@ acceleration in m/s^2 and front mid-axle steering angle in radians.
 ```mermaid
 flowchart LR
     request[PlanRequest] --> planner[PathPlanner]
-    planner --> collision[CollisionChecker]
+    planner --> scene[CollisionScene]
+    scene --> collision[CollisionChecker queries]
     planner --> goal[ParkingGoalEvaluator]
     planner --> path[Path: Waypoint list]
     path --> trajectory[TrajectoryGenerator]
@@ -69,6 +71,11 @@ width.
 
 - `CollisionChecker` inflates that footprint by a configured clearance when
   deciding whether a candidate is safe.
+- `CollisionScene` constructs the validated collision inputs once per planning
+  request. Its immutable shared storage lets a checker retain a lightweight
+  scene handle without copying polygon geometry; a checker may outlive the
+  caller's scene object. The planner owns the scene for the duration of its
+  planning operation and passes it to collision-query consumers.
 - `ParkingGoalEvaluator` uses the real, uninflated footprint to decide whether
   the complete vehicle is in the slot and the heading is acceptable.
 

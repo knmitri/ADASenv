@@ -20,6 +20,12 @@ void require(bool condition, const std::string& message) {
     if (!condition) throw std::runtime_error(message);
 }
 
+parking_adas::CollisionChecker make_collision_checker(
+    const parking_adas::PlanRequest& request) {
+    const parking_adas::CollisionScene scene(request);
+    return parking_adas::CollisionChecker(scene);
+}
+
 parking_adas::Pose integrate_segment(
     parking_adas::Pose pose, parking_adas::ReedsSheppSegmentType type,
     double signed_length, double radius) {
@@ -272,7 +278,7 @@ void test_cusp_markers() {
     require(found, "no deterministic two-cusp connector fixture was found");
 
     const parking_adas::PlanRequest request = open_request(target);
-    const parking_adas::CollisionChecker checker(request);
+    const parking_adas::CollisionChecker checker = make_collision_checker(request);
     const parking_adas::ParkingGoalEvaluator evaluator(request);
     std::vector<parking_adas::Waypoint> waypoints;
     require(connector.connect({}, target, 1, request, checker, evaluator,
@@ -361,7 +367,7 @@ void test_blocked_shortest_candidate_fallback() {
                 blocked_pose.x, blocked_pose.y, 0.0, 0.0, 0.0,
                 square(blocked_pose.x, blocked_pose.y, 0.12),
             });
-            const parking_adas::CollisionChecker checker(request);
+            const parking_adas::CollisionChecker checker = make_collision_checker(request);
             const parking_adas::ParkingGoalEvaluator evaluator(request);
             if (clear_path(start, candidates.front(), radius, checker)) continue;
             const auto longer_clear = std::find_if(
@@ -415,7 +421,7 @@ void test_deadline_and_failure_output() {
     const parking_adas::Pose start{};
     parking_adas::PlanRequest invalid = open_request({2.0, 0.0, 0.0});
     invalid.vehicle.wheelbase = 0.0;
-    const parking_adas::CollisionChecker invalid_checker(invalid);
+    const parking_adas::CollisionChecker invalid_checker = make_collision_checker(invalid);
     const parking_adas::ParkingGoalEvaluator invalid_evaluator(invalid);
     std::vector<parking_adas::Waypoint> path{{9.0, 9.0, 1, 0.0, 0.0, 0.5, false}};
     require(!connector.connect(start, invalid.goal, 1, invalid, invalid_checker,
@@ -425,7 +431,7 @@ void test_deadline_and_failure_output() {
             "analytical failure did not clear a pre-populated output vector");
 
     parking_adas::PlanRequest request = open_request({1000000.0, 0.0, 0.0});
-    const parking_adas::CollisionChecker checker(request);
+    const parking_adas::CollisionChecker checker = make_collision_checker(request);
     const parking_adas::ParkingGoalEvaluator evaluator(request);
     path = {{9.0, 9.0, 1, 0.0, 0.0, 0.5, false}};
     const auto deadline = std::chrono::steady_clock::now() +
@@ -470,7 +476,7 @@ void test_default_dispatch() {
     const parking_adas::Pose start{};
     const parking_adas::Pose goal{2.0, 0.0, 0.0};
     const parking_adas::PlanRequest request = open_request(goal);
-    const parking_adas::CollisionChecker checker(request);
+    const parking_adas::CollisionChecker checker = make_collision_checker(request);
     const parking_adas::ParkingGoalEvaluator evaluator(request);
     const auto deadline = std::chrono::steady_clock::now() +
         std::chrono::seconds(2);

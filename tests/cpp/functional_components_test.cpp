@@ -7,6 +7,7 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -25,6 +26,13 @@ namespace {
 
 void require(bool condition, const std::string& message) {
     if (!condition) throw std::runtime_error(message);
+}
+
+parking_adas::CollisionChecker make_collision_checker(
+    const parking_adas::PlanRequest& request,
+    double clearance = 0.1) {
+    const parking_adas::CollisionScene scene(request, clearance);
+    return parking_adas::CollisionChecker(scene);
 }
 
 double distance_to_segment(const parking_adas::Pose& pose,
@@ -236,7 +244,7 @@ parking_adas::PlanRequest base_request() {
 
 void test_collision_checker() {
     parking_adas::PlanRequest request = base_request();
-    parking_adas::CollisionChecker checker(request);
+    parking_adas::CollisionChecker checker = make_collision_checker(request);
     parking_adas::ParkingGoalEvaluator goal_evaluator(request);
     require(!checker.is_collision({0.0, 0.0, 0.0}), "clear pose reported as collision");
     require(checker.is_collision({-1.5, 0.0, 0.0}), "out-of-bounds pose was accepted");
@@ -245,8 +253,56 @@ void test_collision_checker() {
     require(!goal_evaluator.is_satisfied({-0.8, 0.0, 0.0}),
             "goal slot accepted a vehicle outside its footprint");
     request.static_obstacles.push_back({3.0, 0.0, 0.0, 4.67, 1.86, {}});
-    parking_adas::CollisionChecker obstacle_checker(request);
+    parking_adas::CollisionChecker obstacle_checker = make_collision_checker(request);
     require(obstacle_checker.is_collision({3.0, 0.0, 0.0}), "obstacle footprint was ignored");
+}
+
+void test_collision_scene_snapshot_and_reuse() {
+    static_assert(std::is_copy_constructible<parking_adas::CollisionScene>::value,
+                  "collision scenes should be shareable by value");
+    static_assert(!std::is_copy_assignable<parking_adas::CollisionScene>::value,
+                  "collision scenes must not be reassignable after construction");
+
+    parking_adas::PlanRequest request = base_request();
+    const parking_adas::CollisionScene scene(request);
+    const parking_adas::CollisionScene shared_scene(scene);
+    const parking_adas::CollisionChecker first_checker(scene);
+    const parking_adas::CollisionChecker second_checker(shared_scene);
+    require(!first_checker.is_collision({0.0, 0.0, 0.0}) &&
+                !second_checker.is_collision({0.0, 0.0, 0.0}),
+            "a valid scene could not be reused across collision checkers");
+
+    request.static_obstacles.push_back({0.0, 0.0, 0.0, 1.0, 1.0, {}});
+    require(!first_checker.is_collision({0.0, 0.0, 0.0}),
+            "scene changed after its source request was modified");
+
+    const parking_adas::CollisionChecker retained_checker{
+        parking_adas::CollisionScene(request)};
+    require(retained_checker.is_collision({0.0, 0.0, 0.0}),
+            "checker did not retain its immutable scene handle");
+
+    parking_adas::PlanRequest clearance_request = base_request();
+    clearance_request.static_obstacles.push_back({0.0, 1.2, 0.0, 0.2, 0.2, {}});
+    const parking_adas::CollisionChecker physical_checker{
+        parking_adas::CollisionScene(clearance_request, 0.0)};
+    const parking_adas::CollisionChecker clearance_checker{
+        parking_adas::CollisionScene(clearance_request, 0.2)};
+    require(!physical_checker.is_collision({0.0, 0.0, 0.0}) &&
+                clearance_checker.is_collision({0.0, 0.0, 0.0}),
+            "scene clearance did not preserve the requested footprint inflation");
+
+    clearance_request.static_obstacles[0].footprint = {{0.0, 0.0}, {1.0, 0.0}, {0.0, 1.0}};
+    const parking_adas::CollisionChecker invalid_geometry_checker{
+        parking_adas::CollisionScene(clearance_request, 0.0)};
+    require(invalid_geometry_checker.is_collision({10.0, 10.0, 0.0}),
+            "invalid scene geometry did not fail closed");
+
+    clearance_request = base_request();
+    clearance_request.world_min_x = clearance_request.world_max_x;
+    const parking_adas::CollisionChecker invalid_world_checker{
+        parking_adas::CollisionScene(clearance_request)};
+    require(invalid_world_checker.is_collision({0.0, 0.0, 0.0}),
+            "invalid scene world bounds did not fail closed");
 }
 
 void test_swept_collision_checker() {
@@ -255,7 +311,7 @@ void test_swept_collision_checker() {
     request.world_min_y = -20.0;
     request.world_max_x = 20.0;
     request.world_max_y = 20.0;
-    parking_adas::CollisionChecker clear_checker(request, 0.0);
+    parking_adas::CollisionChecker clear_checker = make_collision_checker(request, 0.0);
 
     require(!clear_checker.is_swept_collision(
                 {0.0, 0.0, 0.0}, {2.0, 0.0, 0.0}, 2.0, 0.0),
@@ -263,8 +319,8 @@ void test_swept_collision_checker() {
     parking_adas::PlanRequest near_obstacle_request = request;
     near_obstacle_request.static_obstacles.push_back(
         {1.0, 1.15, 0.0, 0.2, 0.2, {}});
-    parking_adas::CollisionChecker near_obstacle_checker(
-        near_obstacle_request, 0.0);
+    parking_adas::CollisionChecker near_obstacle_checker =
+        make_collision_checker(near_obstacle_request, 0.0);
     require(!near_obstacle_checker.is_swept_collision(
                 {0.0, 0.0, 0.0}, {0.02, 0.0, 0.0}, 0.02, 0.0) &&
                 !near_obstacle_checker.is_swept_collision(
@@ -292,7 +348,8 @@ void test_swept_collision_checker() {
         3.71, 0.93, 0.0, 0.0, 0.0,
         {{3.69, 0.91}, {3.73, 0.91}, {3.73, 0.95}, {3.69, 0.95}},
     });
-    parking_adas::CollisionChecker rotation_checker(rotation_request, 0.0);
+    parking_adas::CollisionChecker rotation_checker =
+        make_collision_checker(rotation_request, 0.0);
     require(!rotation_checker.is_collision({0.0, 0.0, -0.1}) &&
                 !rotation_checker.is_collision({0.0, 0.0, 0.1}),
             "rotation-gap test endpoints unexpectedly collide");
@@ -317,7 +374,8 @@ void test_swept_collision_checker() {
          {corner.x + 0.003, corner.y + 0.003},
          {corner.x - 0.003, corner.y + 0.003}},
     });
-    parking_adas::CollisionChecker narrow_checker(narrow_request, 0.0);
+    parking_adas::CollisionChecker narrow_checker =
+        make_collision_checker(narrow_request, 0.0);
     require(!narrow_checker.is_collision({0.0, 0.0, 0.0}),
             "narrow-obstacle fixture collides at the first 10 cm sample endpoint");
     require(!narrow_checker.is_collision(arc_end),
@@ -347,8 +405,8 @@ void test_swept_collision_checker() {
          {reverse_corner.x + 0.003, reverse_corner.y + 0.003},
          {reverse_corner.x - 0.003, reverse_corner.y + 0.003}},
     });
-    parking_adas::CollisionChecker reverse_narrow_checker(
-        reverse_narrow_request, 0.0);
+    parking_adas::CollisionChecker reverse_narrow_checker =
+        make_collision_checker(reverse_narrow_request, 0.0);
     require(!reverse_narrow_checker.is_collision({0.0, 0.0, 0.0}) &&
                 !reverse_narrow_checker.is_collision(reverse_end) &&
                 reverse_narrow_checker.is_collision(reverse_middle) &&
@@ -360,14 +418,14 @@ void test_swept_collision_checker() {
     parking_adas::PlanRequest front_request = request;
     front_request.static_obstacles.push_back(
         {3.7, 0.9, 0.0, 0.2, 0.2, {}});
-    parking_adas::CollisionChecker front_checker(front_request, 0.0);
+    parking_adas::CollisionChecker front_checker = make_collision_checker(front_request, 0.0);
     require(front_checker.is_collision({0.0, 0.0, 0.0}),
             "front-corner collision was not detected");
 
     parking_adas::PlanRequest rear_request = request;
     rear_request.static_obstacles.push_back(
         {-0.95, 0.9, 0.0, 0.2, 0.2, {}});
-    parking_adas::CollisionChecker rear_checker(rear_request, 0.0);
+    parking_adas::CollisionChecker rear_checker = make_collision_checker(rear_request, 0.0);
     require(rear_checker.is_collision({0.0, 0.0, 0.0}),
             "rear-corner collision was not detected");
 
@@ -381,15 +439,16 @@ void test_swept_collision_checker() {
     parking_adas::PlanRequest colliding_goal_request = request;
     colliding_goal_request.static_obstacles.push_back(
         {2.0, 0.0, 0.0, 0.2, 0.2, {}});
-    parking_adas::CollisionChecker colliding_goal_checker(
-        colliding_goal_request, 0.0);
+    parking_adas::CollisionChecker colliding_goal_checker =
+        make_collision_checker(colliding_goal_request, 0.0);
     require(colliding_goal_checker.is_collision(colliding_goal_request.goal),
             "colliding goal pose was accepted");
 
     parking_adas::PlanRequest boundary_request = request;
     boundary_request.world_max_x =
         request.vehicle.wheelbase + request.vehicle.front_overhang;
-    parking_adas::CollisionChecker boundary_checker(boundary_request, 0.0);
+    parking_adas::CollisionChecker boundary_checker =
+        make_collision_checker(boundary_request, 0.0);
     require(!boundary_checker.is_collision({0.0, 0.0, 0.0}),
             "footprint grazing the boundary was treated as outside");
     require(boundary_checker.is_swept_collision(
@@ -401,7 +460,8 @@ void test_swept_collision_checker() {
         {10.0, 10.0, 0.0, 1.0, 1.0, {}},
         {0.0, 0.0, 0.0, 0.2, 0.2, {}},
     };
-    parking_adas::CollisionChecker multiple_checker(multiple_request, 0.0);
+    parking_adas::CollisionChecker multiple_checker =
+        make_collision_checker(multiple_request, 0.0);
     require(multiple_checker.is_collision({0.0, 0.0, 0.0}),
             "collision with a later obstacle was not detected");
 
@@ -410,7 +470,8 @@ void test_swept_collision_checker() {
         0.0, 0.0, 0.0, 1.0, 1.0,
         {{0.0, 0.0}, {1.0, 0.0}, {0.5, 0.2}, {0.0, 1.0}},
     });
-    parking_adas::CollisionChecker malformed_checker(malformed_request, 0.0);
+    parking_adas::CollisionChecker malformed_checker =
+        make_collision_checker(malformed_request, 0.0);
     require(malformed_checker.is_collision({10.0, 10.0, 0.0}),
             "malformed obstacle polygon did not fail closed");
 }
@@ -440,7 +501,7 @@ void test_collision_check_performance() {
         request.vehicle.width / 2.0 + 0.1);
 
     auto measure = [&](bool swept) {
-        parking_adas::CollisionChecker checker(request);
+        parking_adas::CollisionChecker checker = make_collision_checker(request);
         double total_ms = 0.0;
         double worst_ms = 0.0;
         for (int repetition = 0; repetition < kRepetitions; ++repetition) {
@@ -512,7 +573,7 @@ void test_hybrid_a_star() {
         require(point.target_speed >= -request.vehicle.max_reverse_speed - 1e-9,
             "planner exceeded reverse speed limit");
     }
-    parking_adas::CollisionChecker checker(request);
+    parking_adas::CollisionChecker checker = make_collision_checker(request);
     parking_adas::ParkingGoalEvaluator goal_evaluator(request);
     require(goal_evaluator.is_satisfied({path.back().x, path.back().y, path.back().heading}),
             "planner endpoint does not place the whole vehicle in the goal slot");
@@ -524,7 +585,7 @@ void test_hybrid_a_star() {
 
 void test_reeds_shepp_connector() {
     parking_adas::PlanRequest request = base_request();
-    parking_adas::CollisionChecker collision_checker(request);
+    parking_adas::CollisionChecker collision_checker = make_collision_checker(request);
     parking_adas::ParkingGoalEvaluator goal_evaluator(request);
     parking_adas::ReedsSheppConnector connector;
     std::vector<parking_adas::Waypoint> path;
@@ -549,7 +610,8 @@ void test_reeds_shepp_connector() {
         {-6.0, -1.5}, {2.0, -1.5}, {2.0, 1.5}, {-6.0, 1.5},
     }};
     request.world_min_x = -8.0;
-    parking_adas::CollisionChecker reverse_collision_checker(request);
+    parking_adas::CollisionChecker reverse_collision_checker =
+        make_collision_checker(request);
     parking_adas::ParkingGoalEvaluator reverse_goal_evaluator(request);
     path.clear();
     require(connector.connect(
@@ -571,7 +633,8 @@ void test_reeds_shepp_connector() {
 
 void test_analytical_reeds_shepp_collision_connection() {
     const parking_adas::PlanRequest request = base_request();
-    const parking_adas::CollisionChecker collision_checker(request);
+    const parking_adas::CollisionChecker collision_checker =
+        make_collision_checker(request);
     const parking_adas::ParkingGoalEvaluator goal_evaluator(request);
     const parking_adas::ReedsSheppConnector connector;
     std::vector<parking_adas::Waypoint> path;
@@ -663,7 +726,8 @@ void test_analytical_reeds_shepp_candidates() {
     zero_request.goal_slot_footprint = {
         {-2.0, -1.5}, {8.0, -1.5}, {8.0, 1.5}, {-2.0, 1.5},
     };
-    const parking_adas::CollisionChecker zero_collision_checker(zero_request);
+    const parking_adas::CollisionChecker zero_collision_checker =
+        make_collision_checker(zero_request);
     const parking_adas::ParkingGoalEvaluator zero_goal_evaluator(zero_request);
     std::vector<parking_adas::Waypoint> zero_path;
     require(connector.connect(
@@ -1049,6 +1113,7 @@ void test_protocol() {
 int main() {
     try {
         test_collision_checker();
+        test_collision_scene_snapshot_and_reuse();
         test_swept_collision_checker();
         test_collision_check_performance();
         test_hybrid_a_star();

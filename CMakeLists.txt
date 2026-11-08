@@ -43,6 +43,7 @@ add_library(
   reference_adas_stacks/core/src/control/pure_pursuit_tracker.cpp
   reference_adas_stacks/core/src/planning/parking_adas_stack.cpp
   reference_adas_stacks/core/src/planning/path_planner.cpp
+  reference_adas_stacks/core/src/planning/collision_scene.cpp
   reference_adas_stacks/core/src/planning/collision_checker.cpp
   reference_adas_stacks/core/src/planning/parking_goal_evaluator.cpp
   reference_adas_stacks/core/src/planning/reeds_shepp_connector.cpp

@@ -80,7 +80,8 @@ MotionCommand ParkingAdasStack::command(const VehicleState& state) {
     // The simulator is authoritative for contact. Use its physical footprint for
     // one-step intervention; planning remains conservative through its default
     // clearance so a legal near-boundary manoeuvre is not rejected mid-execution.
-    const CollisionChecker collision_checker(safety_request, 0.0);
+    const CollisionScene collision_scene(safety_request, 0.0);
+    const CollisionChecker collision_checker(collision_scene);
 
     const double predicted_velocity =
         state.velocity + command.acceleration * request_.dt;

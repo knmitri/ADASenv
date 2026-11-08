@@ -81,7 +81,8 @@ std::vector<Waypoint> HybridAStarPlanner::plan(const PlanRequest& request) {
     diagnostics_ = {};
     diagnostics_.closest_goal_distance = std::hypot(
         request.start_x - request.goal.x, request.start_y - request.goal.y);
-    const CollisionChecker collision_checker(request);
+    const CollisionScene collision_scene(request);
+    const CollisionChecker collision_checker(collision_scene);
     const ParkingGoalEvaluator goal_evaluator(request);
     const ReedsSheppConnector reeds_shepp_connector;
     std::vector<Node> nodes{{
