@@ -53,6 +53,20 @@ void TcpClient::connect_to(const std::string& host, const std::string& port) {
             continue;
         }
         if (::connect(socket_, ptr->ai_addr, static_cast<int>(ptr->ai_addrlen)) == 0) {
+#if !defined(_WIN32) && !defined(MSG_NOSIGNAL) && defined(SO_NOSIGPIPE)
+            const int enabled = 1;
+            if (setsockopt(
+                    socket_,
+                    SOL_SOCKET,
+                    SO_NOSIGPIPE,
+                    reinterpret_cast<const char*>(&enabled),
+                    static_cast<socklen_t>(sizeof(enabled))
+                ) != 0) {
+                close_socket();
+                freeaddrinfo(result);
+                throw std::runtime_error("could not suppress SIGPIPE for socket writes");
+            }
+#endif
             freeaddrinfo(result);
             return;
         }
@@ -74,9 +88,16 @@ void TcpClient::write_line(const std::string& line) {
     std::size_t remaining = payload.size();
     while (remaining > 0) {
         const auto chunk_size = std::min<std::size_t>(remaining, 4096);
-        const int sent = static_cast<int>(
-            ::send(socket_, cursor, static_cast<int>(chunk_size), 0)
-        );
+        int flags = 0;
+#if !defined(_WIN32) && defined(MSG_NOSIGNAL)
+        flags |= MSG_NOSIGNAL;
+#endif
+        const int sent = static_cast<int>(::send(
+            socket_,
+            cursor,
+            static_cast<int>(chunk_size),
+            flags
+        ));
         if (sent <= 0) {
             throw std::runtime_error("socket send failed");
         }

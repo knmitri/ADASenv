@@ -55,6 +55,28 @@ class _FakeProcess:
         self.killed = True
 
 
+class _GracefulProcess:
+    def __init__(self) -> None:
+        self.returncode = None
+        self.wait_timeouts = []
+        self.terminated = False
+        self.killed = False
+
+    def poll(self):
+        return self.returncode
+
+    def wait(self, timeout=None):
+        self.wait_timeouts.append(timeout)
+        self.returncode = 0
+        return self.returncode
+
+    def terminate(self) -> None:
+        self.terminated = True
+
+    def kill(self) -> None:
+        self.killed = True
+
+
 class _FakeSocket:
     def __init__(self) -> None:
         self.closed = False
@@ -193,9 +215,12 @@ def test_json_connection_setup_failure_closes_partial_resources() -> None:
 
 
 class _FakeSimulation:
-    def __init__(self, *, fail_step=False) -> None:
+    def __init__(self, *, fail_step=False, fail_reset=False, fail_close=False) -> None:
         self.fail_step = fail_step
+        self.fail_reset = fail_reset
+        self.fail_close = fail_close
         self.closed = False
+        self.close_calls = 0
         self.render_enabled = True
         self.world_min_x = -2.0
         self.world_min_y = -2.0
@@ -204,6 +229,8 @@ class _FakeSimulation:
         self.planned_path = []
 
     def reset(self):
+        if self.fail_reset:
+            raise RuntimeError("simulated reset failure")
         return {"position": [0.0, 0.0], "heading": 0.0, "velocity": [0.0, 0.0]}
 
     def get_goal_pose(self):
@@ -232,19 +259,27 @@ class _FakeSimulation:
         )
 
     def close(self) -> None:
+        self.close_calls += 1
         self.closed = True
+        if self.fail_close:
+            raise OSError("simulation close failed")
 
 
 class _FakeVisualizer:
-    def __init__(self, _config) -> None:
+    def __init__(self, _config, *, fail_close=False) -> None:
+        self.fail_close = fail_close
         self.closed = False
+        self.close_calls = 0
         self.fig = None
 
     def render(self, **_kwargs) -> None:
         pass
 
     def close(self) -> None:
+        self.close_calls += 1
         self.closed = True
+        if self.fail_close:
+            raise OSError("visualizer close failed")
 
 
 def _run_slot(connection, trace_dir, monkeypatch, *, fail_step=False):
@@ -256,6 +291,14 @@ def _run_slot(connection, trace_dir, monkeypatch, *, fail_step=False):
     def create_trace(*args):
         trace = real_trace_logger(*args)
         traces.append(trace)
+        original_close = trace.close
+        trace.close_calls = 0
+
+        def close_trace():
+            trace.close_calls += 1
+            original_close()
+
+        trace.close = close_trace
         return trace
 
     monkeypatch.setattr(
@@ -294,6 +337,16 @@ def test_accept_timeout_stops_launched_stack(monkeypatch) -> None:
 
     assert server.closed
     assert process.poll() is not None
+
+
+def test_stack_process_is_allowed_to_exit_gracefully() -> None:
+    process = _GracefulProcess()
+
+    experiment_runner._stop_stack_process(process)
+
+    assert process.wait_timeouts == [5.0]
+    assert not process.terminated
+    assert not process.killed
 
 
 def test_handshake_failure_closes_socket_and_stops_stack(monkeypatch) -> None:
@@ -340,6 +393,19 @@ def test_handshake_failure_closes_socket_and_stops_stack(monkeypatch) -> None:
             True,
             "simulated step failure",
         ),
+        (
+            [
+                {"type": "ready"},
+                {
+                    "type": "command",
+                    "longitudinal_acceleration_mps2": 0.0,
+                    "front_mid_axle_steering_angle_rad": 0.0,
+                },
+                ConnectionError("result acknowledgement failed"),
+            ],
+            False,
+            "result acknowledgement failed",
+        ),
     ],
 )
 def test_remote_slot_failure_closes_simulator_visualizer_and_trace(
@@ -355,6 +421,14 @@ def test_remote_slot_failure_closes_simulator_visualizer_and_trace(
     def create_trace(*args):
         trace = real_trace_logger(*args)
         traces.append(trace)
+        original_close = trace.close
+        trace.close_calls = 0
+
+        def close_trace():
+            trace.close_calls += 1
+            original_close()
+
+        trace.close = close_trace
         return trace
 
     monkeypatch.setattr(
@@ -382,9 +456,12 @@ def test_remote_slot_failure_closes_simulator_visualizer_and_trace(
         )
 
     assert sim.closed
+    assert sim.close_calls == 1
     assert visualizer.closed
+    assert visualizer.close_calls == 1
     assert len(traces) == 1
     assert traces[0]._file.closed
+    assert traces[0].close_calls == 1
 
 
 def test_remote_slot_success_preserves_result_and_closes_resources(tmp_path, monkeypatch) -> None:
@@ -411,5 +488,217 @@ def test_remote_slot_success_preserves_result_and_closes_resources(tmp_path, mon
     assert result["steps"] == 1
     assert result["trace_path"] == str(traces[0].path)
     assert sim.closed
+    assert sim.close_calls == 1
     assert visualizer.closed
+    assert visualizer.close_calls == 1
     assert traces[0]._file.closed
+    assert traces[0].close_calls == 1
+
+
+def test_reset_failure_closes_partially_initialized_simulator(monkeypatch) -> None:
+    sim = _FakeSimulation(fail_reset=True)
+    monkeypatch.setattr(
+        experiment_runner,
+        "ParkingSimulationEnvironment",
+        lambda **_kwargs: sim,
+    )
+
+    with pytest.raises(RuntimeError, match="simulated reset failure"):
+        experiment_runner.run_remote_slot(
+            connection=_FakeConnection(_FakeSocket(), []),
+            config=_remote_slot_config(),
+            scenario=_scenario(),
+            log_interval=0,
+            live_render=True,
+            render_every=1,
+            save_render_dir=None,
+            trace_dir=None,
+        )
+
+    assert sim.closed
+    assert sim.close_calls == 1
+
+
+def test_visualizer_initialization_failure_closes_simulator(monkeypatch) -> None:
+    sim = _FakeSimulation()
+
+    def fail_visualizer(_config):
+        raise RuntimeError("visualizer initialization failed")
+
+    monkeypatch.setattr(
+        experiment_runner,
+        "ParkingSimulationEnvironment",
+        lambda **_kwargs: sim,
+    )
+    monkeypatch.setattr(experiment_runner, "SimulationVisualizer", fail_visualizer)
+
+    with pytest.raises(RuntimeError, match="visualizer initialization failed"):
+        experiment_runner.run_remote_slot(
+            connection=_FakeConnection(_FakeSocket(), []),
+            config=_remote_slot_config(),
+            scenario=_scenario(),
+            log_interval=0,
+            live_render=True,
+            render_every=1,
+            save_render_dir=None,
+            trace_dir=None,
+        )
+
+    assert sim.closed
+    assert sim.close_calls == 1
+
+
+def test_trace_initialization_failure_closes_prior_resources(tmp_path, monkeypatch) -> None:
+    sim = _FakeSimulation()
+    visualizer = _FakeVisualizer(None)
+
+    def fail_trace(*_args):
+        raise OSError("trace initialization failed")
+
+    monkeypatch.setattr(
+        experiment_runner,
+        "ParkingSimulationEnvironment",
+        lambda **_kwargs: sim,
+    )
+    monkeypatch.setattr(
+        experiment_runner,
+        "SimulationVisualizer",
+        lambda _config: visualizer,
+    )
+    monkeypatch.setattr(experiment_runner, "ExperimentTraceLogger", fail_trace)
+
+    with pytest.raises(OSError, match="trace initialization failed"):
+        experiment_runner.run_remote_slot(
+            connection=_FakeConnection(_FakeSocket(), []),
+            config=_remote_slot_config(),
+            scenario=_scenario(),
+            log_interval=0,
+            live_render=True,
+            render_every=1,
+            save_render_dir=None,
+            trace_dir=tmp_path,
+        )
+
+    assert sim.closed and sim.close_calls == 1
+    assert visualizer.closed and visualizer.close_calls == 1
+
+
+def test_primary_execution_error_survives_cleanup_errors(tmp_path, monkeypatch) -> None:
+    connection = _FakeConnection(
+        _FakeSocket(),
+        [
+            {"type": "ready"},
+            {
+                "type": "command",
+                "longitudinal_acceleration_mps2": 0.0,
+                "front_mid_axle_steering_angle_rad": 0.0,
+            },
+        ],
+    )
+    sim = _FakeSimulation(fail_step=True, fail_close=True)
+    visualizer = _FakeVisualizer(None, fail_close=True)
+    traces = []
+    real_trace_logger = experiment_runner.ExperimentTraceLogger
+
+    def create_trace(*args):
+        trace = real_trace_logger(*args)
+        traces.append(trace)
+        original_close = trace.close
+        trace.close_calls = 0
+
+        def close_trace():
+            trace.close_calls += 1
+            original_close()
+
+        trace.close = close_trace
+        return trace
+
+    monkeypatch.setattr(
+        experiment_runner,
+        "ParkingSimulationEnvironment",
+        lambda **_kwargs: sim,
+    )
+    monkeypatch.setattr(
+        experiment_runner,
+        "SimulationVisualizer",
+        lambda _config: visualizer,
+    )
+    monkeypatch.setattr(experiment_runner, "ExperimentTraceLogger", create_trace)
+
+    with pytest.raises(RuntimeError, match="simulated step failure") as error:
+        experiment_runner.run_remote_slot(
+            connection=connection,
+            config=_remote_slot_config(),
+            scenario=_scenario(),
+            log_interval=0,
+            live_render=True,
+            render_every=1,
+            save_render_dir=None,
+            trace_dir=tmp_path,
+        )
+
+    assert isinstance(error.value.__cause__, OSError)
+    assert "simulation close failed" in str(error.value.__cause__)
+    assert sim.closed and sim.close_calls == 1
+    assert visualizer.closed and visualizer.close_calls == 1
+    assert traces[0]._file.closed and traces[0].close_calls == 1
+
+
+def test_cleanup_failure_is_reported_after_all_resources_are_closed(tmp_path, monkeypatch) -> None:
+    connection = _FakeConnection(
+        _FakeSocket(),
+        [
+            {"type": "ready"},
+            {
+                "type": "command",
+                "longitudinal_acceleration_mps2": 0.0,
+                "front_mid_axle_steering_angle_rad": 0.0,
+            },
+            {"type": "ack"},
+        ],
+    )
+    sim = _FakeSimulation()
+    visualizer = _FakeVisualizer(None, fail_close=True)
+    traces = []
+    real_trace_logger = experiment_runner.ExperimentTraceLogger
+
+    def create_trace(*args):
+        trace = real_trace_logger(*args)
+        traces.append(trace)
+        original_close = trace.close
+        trace.close_calls = 0
+
+        def close_trace():
+            trace.close_calls += 1
+            original_close()
+
+        trace.close = close_trace
+        return trace
+
+    monkeypatch.setattr(
+        experiment_runner,
+        "ParkingSimulationEnvironment",
+        lambda **_kwargs: sim,
+    )
+    monkeypatch.setattr(
+        experiment_runner,
+        "SimulationVisualizer",
+        lambda _config: visualizer,
+    )
+    monkeypatch.setattr(experiment_runner, "ExperimentTraceLogger", create_trace)
+
+    with pytest.raises(OSError, match="visualizer close failed"):
+        experiment_runner.run_remote_slot(
+            connection=connection,
+            config=_remote_slot_config(),
+            scenario=_scenario(),
+            log_interval=0,
+            live_render=True,
+            render_every=1,
+            save_render_dir=None,
+            trace_dir=tmp_path,
+        )
+
+    assert sim.closed and sim.close_calls == 1
+    assert visualizer.closed and visualizer.close_calls == 1
+    assert traces[0]._file.closed and traces[0].close_calls == 1

@@ -153,7 +153,7 @@ def run_remote_slot(
 ) -> dict[str, Any]:
     cleanup = ExitStack()
     try:
-        return _run_remote_slot(
+        result = _run_remote_slot(
             connection,
             config,
             scenario,
@@ -164,8 +164,15 @@ def run_remote_slot(
             trace_dir,
             cleanup,
         )
-    finally:
+    except BaseException as primary_error:
+        try:
+            cleanup.close()
+        except BaseException as cleanup_error:
+            raise primary_error from cleanup_error
+        raise
+    else:
         cleanup.close()
+        return result
 
 
 def _run_remote_slot(
@@ -335,9 +342,6 @@ def _run_remote_slot(
 
     final_position = state["position"]
     final_heading = float(state["heading"])
-    if visualizer is not None:
-        visualizer.close()
-    sim.close()
 
     goal_reached = bool(info.get("goal_reached", False))
     collision_occurred = bool(info.get("collision_occurred", False))
@@ -360,7 +364,6 @@ def _run_remote_slot(
     }
     if trace is not None:
         trace.write("result", result=result, final_info=info)
-        trace.close()
         result["trace_path"] = str(trace.path)
     connection.send({"type": "result", "result": result, "info": info})
     ack = connection.receive()

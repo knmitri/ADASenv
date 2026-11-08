@@ -1,10 +1,10 @@
-#include <algorithm>
 #include <exception>
 #include <iostream>
 #include <stdexcept>
 #include <string>
 #include <thread>
 #include <utility>
+#include <vector>
 
 #include "sim_bridge/transport/tcp_client.hpp"
 
@@ -52,7 +52,11 @@ public:
 
 class LocalServer {
 public:
-    explicit LocalServer(std::string payload) : payload_(std::move(payload)) {
+    explicit LocalServer(std::string payload)
+        : LocalServer(std::vector<std::string>{std::move(payload)}) {}
+
+    explicit LocalServer(std::vector<std::string> writes, bool reset_peer = false)
+        : writes_(std::move(writes)), reset_peer_(reset_peer) {
         listener_ = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
         if (listener_ == sim_bridge::kInvalidSocket) {
             throw std::runtime_error("could not create test server socket");
@@ -111,26 +115,50 @@ private:
             return;
         }
 
-        std::size_t offset = 0;
-        while (offset < payload_.size()) {
-            const std::size_t chunk_size = std::min<std::size_t>(payload_.size() - offset, 3);
-            const int sent = static_cast<int>(::send(
-                peer,
-                payload_.data() + offset,
-                static_cast<int>(chunk_size),
-                0
-            ));
-            if (sent <= 0) {
+        if (reset_peer_) {
+            linger reset{1, 0};
+#ifdef _WIN32
+            const int option_size = static_cast<int>(sizeof(reset));
+#else
+            const socklen_t option_size = static_cast<socklen_t>(sizeof(reset));
+#endif
+            if (setsockopt(
+                    peer,
+                    SOL_SOCKET,
+                    SO_LINGER,
+                    reinterpret_cast<const char*>(&reset),
+                    option_size
+                ) != 0) {
                 close_socket(peer);
                 return;
             }
-            offset += static_cast<std::size_t>(sent);
+            close_socket(peer);
+            server_ok_ = true;
+            return;
+        }
+
+        for (const std::string& write : writes_) {
+            std::size_t offset = 0;
+            while (offset < write.size()) {
+                const int sent = static_cast<int>(::send(
+                    peer,
+                    write.data() + offset,
+                    static_cast<int>(write.size() - offset),
+                    0
+                ));
+                if (sent <= 0) {
+                    close_socket(peer);
+                    return;
+                }
+                offset += static_cast<std::size_t>(sent);
+            }
         }
         server_ok_ = true;
         close_socket(peer);
     }
 
-    std::string payload_;
+    std::vector<std::string> writes_;
+    bool reset_peer_;
     SocketHandle listener_ = sim_bridge::kInvalidSocket;
     unsigned short port_ = 0;
     std::thread thread_;
@@ -155,7 +183,7 @@ void require_throws(Function function, const std::string& expected, const std::s
 }
 
 void test_chunked_and_buffered_frames() {
-    LocalServer server("{\"type\":\"hello\"}\n{\"type\":\"ack\"}\n");
+    LocalServer server(std::vector<std::string>{"{\"type\":\"hello\"}\n{\"type\":\"ack\"}\n"});
     sim_bridge::TcpClient client(64);
     client.connect_to("127.0.0.1", server.port());
 
@@ -165,6 +193,17 @@ void test_chunked_and_buffered_frames() {
     require(client.read_line(line) && line == R"({"type":"ack"})",
             "buffered second frame was not returned");
     require(!client.read_line(line), "closed connection should report no further complete frame");
+    server.join();
+}
+
+void test_maximum_frame_size_excludes_newline() {
+    LocalServer server("1234\n");
+    sim_bridge::TcpClient client(4);
+    client.connect_to("127.0.0.1", server.port());
+
+    std::string line;
+    require(client.read_line(line) && line == "1234",
+            "frame at the configured payload limit was not accepted");
     server.join();
 }
 
@@ -179,6 +218,37 @@ void test_oversized_frame_is_rejected() {
         "oversized TCP frame was not rejected"
     );
     server.join();
+}
+
+void test_newline_in_separate_write() {
+    LocalServer server(std::vector<std::string>{"separate", "\n"});
+    sim_bridge::TcpClient client(8);
+    client.connect_to("127.0.0.1", server.port());
+
+    std::string line;
+    require(client.read_line(line) && line == "separate",
+            "frame split before its newline was not reconstructed");
+    server.join();
+}
+
+void test_write_to_disconnected_peer_is_reported() {
+    LocalServer server(std::vector<std::string>{}, true);
+    sim_bridge::TcpClient client;
+    client.connect_to("127.0.0.1", server.port());
+    server.join();
+
+    std::string line;
+    try {
+        client.read_line(line);
+    } catch (const std::runtime_error&) {
+        // Consume the peer reset before checking that send reports it safely.
+    }
+
+    require_throws<std::runtime_error>(
+        [&] { client.write_line("after disconnect"); },
+        "socket send failed",
+        "write to a disconnected peer was not reported"
+    );
 }
 
 void test_outgoing_frame_limits() {
@@ -225,7 +295,10 @@ int main() {
     try {
         SocketRuntime runtime;
         test_chunked_and_buffered_frames();
+        test_maximum_frame_size_excludes_newline();
         test_oversized_frame_is_rejected();
+        test_newline_in_separate_write();
+        test_write_to_disconnected_peer_is_reported();
         test_outgoing_frame_limits();
         test_incomplete_frame_and_disconnect();
     } catch (const std::exception& error) {
