@@ -224,7 +224,7 @@ bool sample_candidate(const Candidate& candidate, const Pose& start,
 
 }  // namespace
 
-bool ReedsSheppConnector::connect(
+bool ReedsSheppConnector::connect_numerical(
     const Pose& start,
     const Pose& goal,
     int initial_direction,

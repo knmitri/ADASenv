@@ -33,7 +33,7 @@ acceleration in m/s^2 and front mid-axle steering angle in radians.
 | Planning | `planning/path_planner.*` | `PathPlanner` interface and planner factory. The stack depends on this abstraction, not on a search algorithm. |
 | Planning | `planning/hybrid_a_star.*` | `hybrid_astar`: forward/reverse kinematic search, collision-safe expansion, and the provisional-prefix fallback. |
 | Planning | `planning/reeds_shepp_local_planner.*` | `reeds_shepp_local`: direct local connection reference for open-space comparisons. |
-| Planning | `planning/reeds_shepp_connector.*` | Builds and validates low-speed final connections from canonical forward/reverse arc and straight-segment words. |
+| Planning | `planning/reeds_shepp_connector.*`, `planning/reeds_shepp_analytic.cpp` | Enumerates analytical Reeds–Shepp candidates, collision-checks them shortest-first, and retains the prior numerical connector as a selectable fallback. |
 | Planning | `planning/trajectory_generator.*` | Converts a geometric path into a direction-aware speed profile and explicit gear-change stops. |
 | Planning | `planning/trajectory_optimizer.*` | Applies kinematic limits without changing the collision-checked path geometry. |
 | Stack | `planning/parking_adas_stack.cpp`, `stack/parking_adas_stack.hpp` | Orchestrates planning, trajectory construction, tracking, safety prediction, and replan requests. |
@@ -76,6 +76,38 @@ Keeping these as two collaborators is intentional: collision avoidance and
 parking success have different questions, thresholds, and callers. Neither
 should carry hidden rules for the other.
 
+The analytical Reeds–Shepp connector uses a conservative swept-footprint
+check between poses. For each subinterval it bounds any footprint point's
+movement by `arc_length + footprint_radius * absolute_heading_change`; if the
+starting footprint is farther from every obstacle and world boundary than
+this bound, the interval is clear. Sampling subdivides each constant-curvature
+segment until this movement bound is at most 2.5 cm. The bound includes both
+translation and rotation and uses the checker-expanded footprint. This is a
+sufficient, not necessary, clearance test: it can conservatively reject
+collision-free motion near obstacles. It assumes valid convex quadrilateral
+obstacles and constant curvature within each checked interval; malformed
+obstacle geometry fails closed. The existing discrete `is_collision()` API
+remains available, and the numerical connector retains its prior sampling
+behavior for comparison.
+
+Python exports parked-car obstacle polygons inflated by 0.3 m per side so
+their explicit corners match the previously exported padded dimensions. The
+C++ bridge prioritizes explicit corners over dimensions, making this agreement
+necessary for the intended obstacle margin to take effect.
+
+The Release microbenchmark in `functional_components_test` compares 20 runs
+of a 6 m straight-plus-turn path with five distant obstacles. On MSVC 19.40,
+the final measured run reported a 10 cm discrete baseline average of 0.0086 ms
+(worst 0.0158 ms, 61 pose checks) and a 2.5 cm swept-bound average of 1.049 ms
+(worst 1.424 ms, 705 pose checks, 352 swept checks, and 1,760
+obstacle-distance checks). These are microbenchmark observations, not
+planning-budget guarantees; timings varied between runs. The swept
+method catches the test's narrow corner obstacle that misses the two 10 cm
+endpoint checks, and the clear straight/turn cases produce no false positives.
+Its conservative broad phase can reject safe near-obstacle paths; evaluating
+actual target-vehicle planning budgets and dense obstacle fields remains
+necessary before production deployment.
+
 World bounds are carried explicitly in `PlanRequest`; they are not encoded as
 synthetic obstacles. This avoids a boundary-wall convention leaking into
 planning.
@@ -98,7 +130,10 @@ without turning the first near-goal node into a single point of failure.
 
 `reeds_shepp_local` is a second reference implementation. It asks the local
 connector to directly join the initial pose to the slot-valid terminal pose; it
-is useful for comparison, but does not search around obstacles.
+is useful for comparison, but does not search around obstacles. The analytical
+connector remains opt-in until its optional OMPL distance-comparison test has
+passed on the target build. See the [analytical Reeds–Shepp design](REEDS_SHEPP_ANALYTIC.md)
+for equations, candidate semantics, and validation status.
 
 `TrajectoryGenerator` preserves the planner's collision-checked poses and
 curvatures, then assigns direction-aware low-speed targets and stops at gear

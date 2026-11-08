@@ -1,10 +1,13 @@
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <iostream>
 #include <limits>
+#include <set>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "parking_adas/common/math.hpp"
@@ -37,6 +40,24 @@ double distance_to_segment(const parking_adas::Pose& pose,
     const double closest_x = first.x + projection * dx;
     const double closest_y = first.y + projection * dy;
     return std::hypot(pose.x - closest_x, pose.y - closest_y);
+}
+
+std::string reeds_shepp_word(const parking_adas::ReedsSheppPath& path) {
+    std::string word;
+    for (const parking_adas::ReedsSheppSegment& segment : path.segments) {
+        switch (segment.type) {
+            case parking_adas::ReedsSheppSegmentType::Left:
+                word.push_back('L');
+                break;
+            case parking_adas::ReedsSheppSegmentType::Straight:
+                word.push_back('S');
+                break;
+            case parking_adas::ReedsSheppSegmentType::Right:
+                word.push_back('R');
+                break;
+        }
+    }
+    return word;
 }
 
 struct TrajectoryLeg {
@@ -228,6 +249,258 @@ void test_collision_checker() {
     require(obstacle_checker.is_collision({3.0, 0.0, 0.0}), "obstacle footprint was ignored");
 }
 
+void test_swept_collision_checker() {
+    parking_adas::PlanRequest request = base_request();
+    request.world_min_x = -20.0;
+    request.world_min_y = -20.0;
+    request.world_max_x = 20.0;
+    request.world_max_y = 20.0;
+    parking_adas::CollisionChecker clear_checker(request, 0.0);
+
+    require(!clear_checker.is_swept_collision(
+                {0.0, 0.0, 0.0}, {2.0, 0.0, 0.0}, 2.0, 0.0),
+            "clear straight sweep was rejected");
+    parking_adas::PlanRequest near_obstacle_request = request;
+    near_obstacle_request.static_obstacles.push_back(
+        {1.0, 1.15, 0.0, 0.2, 0.2, {}});
+    parking_adas::CollisionChecker near_obstacle_checker(
+        near_obstacle_request, 0.0);
+    require(!near_obstacle_checker.is_swept_collision(
+                {0.0, 0.0, 0.0}, {0.02, 0.0, 0.0}, 0.02, 0.0) &&
+                !near_obstacle_checker.is_swept_collision(
+                    {0.02, 0.0, 0.0}, {0.0, 0.0, 0.0}, 0.02, 0.0),
+            "near-obstacle straight forward/reverse sweep was rejected");
+    const double curvature = std::tan(request.vehicle.max_steering_angle) /
+        request.vehicle.wheelbase;
+    const parking_adas::Pose forward_turn =
+        parking_adas::integrate_pose_by_distance(
+            {0.0, 0.0, 0.0}, request.vehicle.max_steering_angle,
+            1.0, request.vehicle.wheelbase, 1.0);
+    require(!clear_checker.is_swept_collision(
+                {0.0, 0.0, 0.0}, forward_turn, 1.0, curvature),
+            "clear tight forward turn was rejected");
+    const parking_adas::Pose reverse_turn =
+        parking_adas::integrate_pose_by_distance(
+            {0.0, 0.0, 0.0}, request.vehicle.max_steering_angle,
+            -1.0, request.vehicle.wheelbase, 1.0);
+    require(!clear_checker.is_swept_collision(
+                {0.0, 0.0, 0.0}, reverse_turn, 1.0, curvature),
+            "clear tight reverse turn was rejected");
+
+    parking_adas::PlanRequest rotation_request = request;
+    rotation_request.static_obstacles.push_back({
+        3.71, 0.93, 0.0, 0.0, 0.0,
+        {{3.69, 0.91}, {3.73, 0.91}, {3.73, 0.95}, {3.69, 0.95}},
+    });
+    parking_adas::CollisionChecker rotation_checker(rotation_request, 0.0);
+    require(!rotation_checker.is_collision({0.0, 0.0, -0.1}) &&
+                !rotation_checker.is_collision({0.0, 0.0, 0.1}),
+            "rotation-gap test endpoints unexpectedly collide");
+    require(rotation_checker.is_swept_collision(
+                {0.0, 0.0, -0.1}, {0.0, 0.0, 0.1}, 0.0, 0.2),
+            "swept checker missed an obstacle between rotation samples");
+
+    parking_adas::PlanRequest narrow_request = request;
+    const double steering = request.vehicle.max_steering_angle;
+    const double arc_curvature = std::tan(steering) / request.vehicle.wheelbase;
+    const parking_adas::Pose arc_middle = parking_adas::integrate_pose_by_distance(
+        {0.0, 0.0, 0.0}, steering, 0.05, request.vehicle.wheelbase, 0.05);
+    const parking_adas::Pose arc_end = parking_adas::integrate_pose_by_distance(
+        {0.0, 0.0, 0.0}, steering, 0.10, request.vehicle.wheelbase, 0.10);
+    const parking_adas::Polygon middle_footprint =
+        parking_adas::vehicle_footprint(arc_middle, request.vehicle);
+    const parking_adas::Point2 corner = middle_footprint[3];
+    narrow_request.static_obstacles.push_back({
+        corner.x, corner.y, 0.0, 0.0, 0.0,
+        {{corner.x - 0.003, corner.y - 0.003},
+         {corner.x + 0.003, corner.y - 0.003},
+         {corner.x + 0.003, corner.y + 0.003},
+         {corner.x - 0.003, corner.y + 0.003}},
+    });
+    parking_adas::CollisionChecker narrow_checker(narrow_request, 0.0);
+    require(!narrow_checker.is_collision({0.0, 0.0, 0.0}),
+            "narrow-obstacle fixture collides at the first 10 cm sample endpoint");
+    require(!narrow_checker.is_collision(arc_end),
+            "narrow-obstacle fixture collides at the second 10 cm sample endpoint");
+    require(narrow_checker.is_collision(arc_middle) &&
+                narrow_checker.is_swept_collision(
+                    {0.0, 0.0, 0.0}, arc_end, 0.10,
+                    arc_curvature * 0.10),
+            "swept checker missed a narrow obstacle between 10 cm samples");
+
+    parking_adas::PlanRequest reverse_narrow_request = request;
+    const parking_adas::Pose reverse_middle =
+        parking_adas::integrate_pose_by_distance(
+            {0.0, 0.0, 0.0}, steering, -0.05,
+            request.vehicle.wheelbase, 0.05);
+    const parking_adas::Pose reverse_end =
+        parking_adas::integrate_pose_by_distance(
+            {0.0, 0.0, 0.0}, steering, -0.10,
+            request.vehicle.wheelbase, 0.10);
+    const parking_adas::Polygon reverse_middle_footprint =
+        parking_adas::vehicle_footprint(reverse_middle, request.vehicle);
+    const parking_adas::Point2 reverse_corner = reverse_middle_footprint[0];
+    reverse_narrow_request.static_obstacles.push_back({
+        reverse_corner.x, reverse_corner.y, 0.0, 0.0, 0.0,
+        {{reverse_corner.x - 0.003, reverse_corner.y - 0.003},
+         {reverse_corner.x + 0.003, reverse_corner.y - 0.003},
+         {reverse_corner.x + 0.003, reverse_corner.y + 0.003},
+         {reverse_corner.x - 0.003, reverse_corner.y + 0.003}},
+    });
+    parking_adas::CollisionChecker reverse_narrow_checker(
+        reverse_narrow_request, 0.0);
+    require(!reverse_narrow_checker.is_collision({0.0, 0.0, 0.0}) &&
+                !reverse_narrow_checker.is_collision(reverse_end) &&
+                reverse_narrow_checker.is_collision(reverse_middle) &&
+                reverse_narrow_checker.is_swept_collision(
+                    {0.0, 0.0, 0.0}, reverse_end, 0.10,
+                    arc_curvature * 0.10),
+            "swept checker missed a narrow obstacle on a reverse tight turn");
+
+    parking_adas::PlanRequest front_request = request;
+    front_request.static_obstacles.push_back(
+        {3.7, 0.9, 0.0, 0.2, 0.2, {}});
+    parking_adas::CollisionChecker front_checker(front_request, 0.0);
+    require(front_checker.is_collision({0.0, 0.0, 0.0}),
+            "front-corner collision was not detected");
+
+    parking_adas::PlanRequest rear_request = request;
+    rear_request.static_obstacles.push_back(
+        {-0.95, 0.9, 0.0, 0.2, 0.2, {}});
+    parking_adas::CollisionChecker rear_checker(rear_request, 0.0);
+    require(rear_checker.is_collision({0.0, 0.0, 0.0}),
+            "rear-corner collision was not detected");
+
+    require(!clear_checker.is_swept_collision(
+                {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}, 0.0, 0.0),
+            "clear zero-length sweep was rejected");
+    require(clear_checker.is_collision({0.0, 0.0, 0.0}) == false,
+            "clear start pose was rejected");
+    require(clear_checker.is_collision({19.0, 0.0, 0.0}),
+            "goal footprint extending beyond the world boundary was accepted");
+    parking_adas::PlanRequest colliding_goal_request = request;
+    colliding_goal_request.static_obstacles.push_back(
+        {2.0, 0.0, 0.0, 0.2, 0.2, {}});
+    parking_adas::CollisionChecker colliding_goal_checker(
+        colliding_goal_request, 0.0);
+    require(colliding_goal_checker.is_collision(colliding_goal_request.goal),
+            "colliding goal pose was accepted");
+
+    parking_adas::PlanRequest boundary_request = request;
+    boundary_request.world_max_x =
+        request.vehicle.wheelbase + request.vehicle.front_overhang;
+    parking_adas::CollisionChecker boundary_checker(boundary_request, 0.0);
+    require(!boundary_checker.is_collision({0.0, 0.0, 0.0}),
+            "footprint grazing the boundary was treated as outside");
+    require(boundary_checker.is_swept_collision(
+                {0.0, 0.0, 0.0}, {0.01, 0.0, 0.0}, 0.01, 0.0),
+            "swept checker failed to conservatively reject boundary grazing");
+
+    parking_adas::PlanRequest multiple_request = request;
+    multiple_request.static_obstacles = {
+        {10.0, 10.0, 0.0, 1.0, 1.0, {}},
+        {0.0, 0.0, 0.0, 0.2, 0.2, {}},
+    };
+    parking_adas::CollisionChecker multiple_checker(multiple_request, 0.0);
+    require(multiple_checker.is_collision({0.0, 0.0, 0.0}),
+            "collision with a later obstacle was not detected");
+
+    parking_adas::PlanRequest malformed_request = request;
+    malformed_request.static_obstacles.push_back({
+        0.0, 0.0, 0.0, 1.0, 1.0,
+        {{0.0, 0.0}, {1.0, 0.0}, {0.5, 0.2}, {0.0, 1.0}},
+    });
+    parking_adas::CollisionChecker malformed_checker(malformed_request, 0.0);
+    require(malformed_checker.is_collision({10.0, 10.0, 0.0}),
+            "malformed obstacle polygon did not fail closed");
+}
+
+void test_collision_check_performance() {
+    parking_adas::PlanRequest request = base_request();
+    request.world_min_x = -50.0;
+    request.world_min_y = -50.0;
+    request.world_max_x = 50.0;
+    request.world_max_y = 50.0;
+    request.static_obstacles = {
+        {20.0, 20.0, 0.2, 4.0, 2.0, {}},
+        {-20.0, 20.0, -0.3, 4.0, 2.0, {}},
+        {20.0, -20.0, 0.5, 4.0, 2.0, {}},
+        {-20.0, -20.0, -0.5, 4.0, 2.0, {}},
+        {0.0, 20.0, 0.0, 4.0, 2.0, {}},
+    };
+    const std::array<std::pair<double, double>, 2> legs{{
+        {0.0, 4.0}, {request.vehicle.max_steering_angle, 2.0},
+    }};
+    constexpr int kRepetitions = 20;
+    constexpr double kLegacySpacing = 0.10;
+    constexpr double kSweptPointMotionBound = 0.025;
+    const double body_radius = std::hypot(
+        std::max(request.vehicle.wheelbase + request.vehicle.front_overhang,
+                 request.vehicle.rear_overhang) + 0.1,
+        request.vehicle.width / 2.0 + 0.1);
+
+    auto measure = [&](bool swept) {
+        parking_adas::CollisionChecker checker(request);
+        double total_ms = 0.0;
+        double worst_ms = 0.0;
+        for (int repetition = 0; repetition < kRepetitions; ++repetition) {
+            const auto begin = std::chrono::steady_clock::now();
+            parking_adas::Pose pose{};
+            require(!checker.is_collision(pose),
+                    "performance fixture unexpectedly collides at start");
+            for (const auto& leg : legs) {
+                const double curvature = std::tan(leg.first) /
+                    request.vehicle.wheelbase;
+                const double motion_rate =
+                    1.0 + body_radius * std::abs(curvature);
+                const double maximum_step = swept
+                    ? kSweptPointMotionBound / motion_rate
+                    : kLegacySpacing;
+                const int samples = std::max(1, static_cast<int>(std::ceil(
+                    std::abs(leg.second) / maximum_step)));
+                const double step = leg.second / samples;
+                for (int sample = 0; sample < samples; ++sample) {
+                    const parking_adas::Pose previous = pose;
+                    pose = parking_adas::integrate_pose_by_distance(
+                        pose, leg.first, step, request.vehicle.wheelbase, step);
+                    const bool collision = swept
+                        ? checker.is_swept_collision(
+                            previous, pose, std::abs(step),
+                            std::abs(curvature * step))
+                        : checker.is_collision(pose);
+                    require(!collision,
+                            "performance fixture unexpectedly collides along path");
+                }
+            }
+            const double elapsed_ms =
+                std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - begin).count();
+            total_ms += elapsed_ms;
+            worst_ms = std::max(worst_ms, elapsed_ms);
+        }
+        return std::array<double, 5>{
+            total_ms / kRepetitions, worst_ms,
+            static_cast<double>(checker.statistics().pose_checks) / kRepetitions,
+            static_cast<double>(checker.statistics().swept_checks) / kRepetitions,
+            static_cast<double>(checker.statistics().obstacle_distance_checks) /
+                kRepetitions,
+        };
+    };
+
+    const auto legacy = measure(false);
+    const auto swept = measure(true);
+    std::cout << "collision-benchmark"
+              << " legacy_avg_ms=" << legacy[0]
+              << " legacy_worst_ms=" << legacy[1]
+              << " legacy_pose_checks=" << legacy[2]
+              << " legacy_swept_checks=" << legacy[3]
+              << " swept_avg_ms=" << swept[0]
+              << " swept_worst_ms=" << swept[1]
+              << " swept_pose_checks=" << swept[2]
+              << " swept_swept_checks=" << swept[3]
+              << " swept_obstacle_distance_checks=" << swept[4] << '\n';
+}
+
 void test_hybrid_a_star() {
     const parking_adas::PlanRequest request = base_request();
     parking_adas::HybridAStarPlanner planner;
@@ -294,6 +567,197 @@ void test_reeds_shepp_connector() {
     require(reverse_goal_evaluator.is_satisfied(
                 {path.back().x, path.back().y, path.back().heading}),
             "reverse Reeds-Shepp connection did not reach the goal pose");
+}
+
+void test_analytical_reeds_shepp_collision_connection() {
+    const parking_adas::PlanRequest request = base_request();
+    const parking_adas::CollisionChecker collision_checker(request);
+    const parking_adas::ParkingGoalEvaluator goal_evaluator(request);
+    const parking_adas::ReedsSheppConnector connector;
+    std::vector<parking_adas::Waypoint> path;
+    const bool connected = connector.connect(
+        {request.start_x, request.start_y, request.start_heading},
+        request.goal, request.start_direction, request, collision_checker,
+        goal_evaluator, std::chrono::steady_clock::now() +
+            std::chrono::seconds(1), path,
+        parking_adas::ReedsSheppImplementation::Analytical);
+    require(connected && !path.empty(),
+            "analytical connector failed to select a collision-free candidate");
+    require(goal_evaluator.is_satisfied(
+                {path.back().x, path.back().y, path.back().heading}),
+            "analytical connector returned a path outside the parking goal");
+    for (const parking_adas::Waypoint& point : path) {
+        require(!collision_checker.is_collision(
+                    {point.x, point.y, point.heading}),
+                "analytical connector returned a colliding sampled waypoint");
+    }
+
+    std::vector<parking_adas::Waypoint> numerical_path;
+    require(connector.connect(
+                {request.start_x, request.start_y, request.start_heading},
+                request.goal, request.start_direction, request, collision_checker,
+                goal_evaluator, std::chrono::steady_clock::now() +
+                    std::chrono::seconds(1), numerical_path,
+                parking_adas::ReedsSheppImplementation::Numerical) &&
+                !numerical_path.empty(),
+            "explicit numerical connector selection failed");
+}
+
+parking_adas::Pose integrate_reeds_shepp_path(
+    const parking_adas::Pose& start,
+    const parking_adas::ReedsSheppPath& path,
+    double turning_radius) {
+    parking_adas::Pose pose = start;
+    for (const parking_adas::ReedsSheppSegment& segment : path.segments) {
+        double curvature = 0.0;
+        if (segment.type == parking_adas::ReedsSheppSegmentType::Left) {
+            curvature = 1.0 / turning_radius;
+        } else if (segment.type == parking_adas::ReedsSheppSegmentType::Right) {
+            curvature = -1.0 / turning_radius;
+        }
+        const double next_yaw = pose.yaw + curvature * segment.signed_length;
+        if (std::abs(curvature) < 1e-12) {
+            pose.x += segment.signed_length * std::cos(pose.yaw);
+            pose.y += segment.signed_length * std::sin(pose.yaw);
+        } else {
+            pose.x += (std::sin(next_yaw) - std::sin(pose.yaw)) / curvature;
+            pose.y += (-std::cos(next_yaw) + std::cos(pose.yaw)) / curvature;
+        }
+        pose.yaw = parking_adas::normalize_angle(next_yaw);
+    }
+    return pose;
+}
+
+void test_analytical_reeds_shepp_candidates() {
+    const parking_adas::ReedsSheppConnector connector;
+    const parking_adas::Pose start{0.0, 0.0, 0.0};
+    constexpr double radius = 2.82;
+
+    // These exact straight-line distances are also OMPL ReedsSheppStateSpace
+    // reference cases for radius=2.82 m.
+    for (const parking_adas::Pose& goal :
+         {parking_adas::Pose{2.0, 0.0, 0.0},
+          parking_adas::Pose{-2.0, 0.0, 0.0}}) {
+        const std::vector<parking_adas::ReedsSheppPath> candidates =
+            connector.analytical_candidates(start, goal, radius);
+        require(!candidates.empty(), "analytical solver missed a straight reference path");
+        require(std::abs(candidates.front().geometric_length - 2.0) < 1e-8,
+                "analytical shortest length differs from the OMPL straight reference");
+        for (const parking_adas::ReedsSheppPath& candidate : candidates) {
+            const parking_adas::Pose endpoint =
+                integrate_reeds_shepp_path(start, candidate, radius);
+            require(std::hypot(endpoint.x - goal.x, endpoint.y - goal.y) < 2e-6,
+                    "analytical candidate does not close in position");
+            require(std::abs(parking_adas::normalize_angle(endpoint.yaw - goal.yaw)) < 2e-6,
+                    "analytical candidate does not close in heading");
+        }
+    }
+
+    const auto zero_length_candidates =
+        connector.analytical_candidates(start, start, radius);
+    require(!zero_length_candidates.empty() &&
+                zero_length_candidates.front().geometric_length < 1e-10,
+            "analytical solver did not retain the zero-length identity path");
+    parking_adas::PlanRequest zero_request = base_request();
+    zero_request.goal = start;
+    zero_request.goal_slot_footprint = {
+        {-2.0, -1.5}, {8.0, -1.5}, {8.0, 1.5}, {-2.0, 1.5},
+    };
+    const parking_adas::CollisionChecker zero_collision_checker(zero_request);
+    const parking_adas::ParkingGoalEvaluator zero_goal_evaluator(zero_request);
+    std::vector<parking_adas::Waypoint> zero_path;
+    require(connector.connect(
+                start, start, 1, zero_request, zero_collision_checker,
+                zero_goal_evaluator, std::chrono::steady_clock::now() +
+                    std::chrono::seconds(1), zero_path,
+                parking_adas::ReedsSheppImplementation::Analytical) &&
+                zero_path.size() == 1,
+            "analytical connector rejected a collision-free zero-length path");
+
+    std::set<std::string> families;
+    std::set<std::string> words;
+    for (int x = -6; x <= 6; ++x) {
+        for (int y = -6; y <= 6; ++y) {
+            for (double yaw : {-2.4, -1.2, 0.0, 1.2, 2.4}) {
+                const parking_adas::Pose goal{0.7 * x, 0.7 * y, yaw};
+                const auto candidates =
+                    connector.analytical_candidates(start, goal, radius);
+                require(!candidates.empty(),
+                        "analytical solver failed to connect a finite pose pair");
+                for (const parking_adas::ReedsSheppPath& candidate : candidates) {
+                    require(std::isfinite(candidate.geometric_length),
+                            "analytical candidate has non-finite length");
+                    const parking_adas::Pose endpoint =
+                        integrate_reeds_shepp_path(start, candidate, radius);
+                    require(std::hypot(endpoint.x - goal.x, endpoint.y - goal.y) < 2e-6 &&
+                            std::abs(parking_adas::normalize_angle(
+                                endpoint.yaw - goal.yaw)) < 2e-6,
+                            "symmetry-generated candidate does not reach its target");
+                    families.insert(candidate.family);
+                    words.insert(reeds_shepp_word(candidate));
+                }
+            }
+        }
+    }
+
+    const auto shortest_length = [&](const parking_adas::Pose& goal) {
+        const auto candidates = connector.analytical_candidates(start, goal, radius);
+        require(!candidates.empty(), "symmetry comparison produced no path");
+        return candidates.front().geometric_length;
+    };
+    for (const parking_adas::Pose& goal :
+         {parking_adas::Pose{2.3, -1.7, 1.1},
+          parking_adas::Pose{-3.2, 2.1, -2.0},
+          parking_adas::Pose{0.0, 0.0, 3.14159265358979323846}}) {
+        const double reference = shortest_length(goal);
+        const double reflected_length =
+            shortest_length({goal.x, -goal.y, -goal.yaw});
+        const double time_flipped_length =
+            shortest_length({-goal.x, goal.y, -goal.yaw});
+        const double cosine = std::cos(goal.yaw);
+        const double sine = std::sin(goal.yaw);
+        const double reverse_x = -goal.x * cosine - goal.y * sine;
+        const double reverse_y = goal.x * sine - goal.y * cosine;
+        const double reversed_length = shortest_length(
+            {reverse_x, reverse_y, -goal.yaw});
+        require(std::abs(reference - reflected_length) < 1e-7 &&
+                std::abs(reference - time_flipped_length) < 1e-7 &&
+                std::abs(reference - reversed_length) < 1e-7,
+                "Reeds-Shepp symmetry changed the shortest path length");
+    }
+    const parking_adas::ReedsSheppPath ccscc_witness{
+        "CCSCC",
+        {
+            {parking_adas::ReedsSheppSegmentType::Left, 0.6 * radius},
+            {parking_adas::ReedsSheppSegmentType::Right, -0.5 * radius * 3.14159265358979323846},
+            {parking_adas::ReedsSheppSegmentType::Straight, -0.5 * radius},
+            {parking_adas::ReedsSheppSegmentType::Left, -0.5 * radius * 3.14159265358979323846},
+            {parking_adas::ReedsSheppSegmentType::Right, 0.4 * radius},
+        },
+        0.0,
+    };
+    const parking_adas::Pose ccscc_goal =
+        integrate_reeds_shepp_path(start, ccscc_witness, radius);
+    for (const parking_adas::Pose& goal :
+         {ccscc_goal,
+          parking_adas::Pose{ccscc_goal.x, -ccscc_goal.y, -ccscc_goal.yaw}}) {
+        for (const parking_adas::ReedsSheppPath& candidate :
+             connector.analytical_candidates(start, goal, radius)) {
+            families.insert(candidate.family);
+            words.insert(reeds_shepp_word(candidate));
+        }
+    }
+    for (const char* family : {"CSC", "CCC", "CCCC", "CCSC", "CCSCC"}) {
+        require(families.count(family) != 0,
+                std::string("analytical canonical family produced no candidates: ") + family);
+    }
+    for (const char* word : {
+             "LRL", "RLR", "LRLR", "RLRL", "LRSL", "RLSR",
+             "LSRL", "RSLR", "LRSR", "RLSL", "RSRL", "LSLR",
+             "LSR", "RSL", "LSL", "RSR", "LRSLR", "RLSRL"}) {
+        require(words.count(word) != 0,
+                std::string("analytical solver did not emit canonical word: ") + word);
+    }
 }
 
 void test_reeds_shepp_local_planner() {
@@ -585,8 +1049,12 @@ void test_protocol() {
 int main() {
     try {
         test_collision_checker();
+        test_swept_collision_checker();
+        test_collision_check_performance();
         test_hybrid_a_star();
         test_reeds_shepp_connector();
+        test_analytical_reeds_shepp_collision_connection();
+        test_analytical_reeds_shepp_candidates();
         test_reeds_shepp_local_planner();
         test_tracker();
         test_tracker_stops_before_gear_change();

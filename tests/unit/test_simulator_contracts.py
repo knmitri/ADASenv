@@ -161,6 +161,9 @@ def test_static_obstacles_export_rotated_footprints() -> None:
     assert "corners" in obstacles[0]
     assert len(obstacles[0]["corners"]) == 4
     assert np.isclose(obstacles[0]["heading"], np.deg2rad(30.0))
+    corners = np.asarray(obstacles[0]["corners"])
+    assert np.isclose(np.linalg.norm(corners[1] - corners[0]), 2.46)
+    assert np.isclose(np.linalg.norm(corners[2] - corners[1]), 5.27)
 
 
 def test_vehicle_contract_exports_rear_axle_geometry_and_limits() -> None:

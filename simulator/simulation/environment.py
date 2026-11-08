@@ -90,7 +90,7 @@ class ParkingSimulationEnvironment:
                     'heading': car.heading,
                     'length': car.length + 0.6,
                     'width': car.width + 0.6,
-                    'corners': car.get_corners().tolist(),
+                    'corners': car.get_corners(margin=0.3).tolist(),
                     'object_type': car.object_type,
                     'object_id': car.object_id,
                 })

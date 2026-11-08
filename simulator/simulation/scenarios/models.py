@@ -26,16 +26,20 @@ class ScenarioObject:
     width: float
     slot_index: int | None = None
 
-    def get_corners(self) -> np.ndarray:
-        """Return object footprint corners in global coordinates."""
+    def get_corners(self, margin: float = 0.0) -> np.ndarray:
+        """Return object footprint corners in global coordinates with optional inflation."""
+        if not np.isfinite(margin) or margin < 0.0:
+            raise ValueError("footprint margin must be finite and nonnegative")
         cos_h = np.cos(self.heading)
         sin_h = np.sin(self.heading)
+        half_length = self.length / 2.0 + margin
+        half_width = self.width / 2.0 + margin
         corners_local = np.array(
             [
-                [-self.length / 2, -self.width / 2],
-                [-self.length / 2, self.width / 2],
-                [self.length / 2, self.width / 2],
-                [self.length / 2, -self.width / 2],
+                [-half_length, -half_width],
+                [-half_length, half_width],
+                [half_length, half_width],
+                [half_length, -half_width],
             ]
         )
 
