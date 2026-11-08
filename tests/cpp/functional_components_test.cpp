@@ -1,6 +1,8 @@
-#include <cmath>
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -35,6 +37,162 @@ double distance_to_segment(const parking_adas::Pose& pose,
     const double closest_x = first.x + projection * dx;
     const double closest_y = first.y + projection * dy;
     return std::hypot(pose.x - closest_x, pose.y - closest_y);
+}
+
+struct TrajectoryLeg {
+    int direction;
+    double steering;
+    double distance;
+};
+
+struct TrackerCase {
+    std::string name;
+    std::vector<TrajectoryLeg> legs;
+    double sample_spacing = 0.10;
+};
+
+std::vector<parking_adas::Waypoint> make_test_trajectory(
+    const std::vector<TrajectoryLeg>& legs,
+    const parking_adas::VehicleParameters& vehicle,
+    double sample_spacing) {
+    std::vector<parking_adas::Waypoint> path;
+    parking_adas::Pose pose{};
+    int previous_direction = 0;
+
+    for (const TrajectoryLeg& leg : legs) {
+        const double curvature = std::tan(leg.steering) / vehicle.wheelbase;
+        if (path.empty()) {
+            path.push_back({pose.x, pose.y, leg.direction, pose.yaw, curvature,
+                            leg.direction * 0.25, false});
+        } else if (leg.direction != previous_direction) {
+            path.back().gear_change = true;
+            path.back().target_speed = 0.0;
+            path.push_back({pose.x, pose.y, leg.direction, pose.yaw, curvature,
+                            0.0, false});
+        }
+
+        const int samples = std::max(
+            1, static_cast<int>(std::ceil(leg.distance / sample_spacing)));
+        const double step = leg.distance / static_cast<double>(samples);
+        for (int sample = 0; sample < samples; ++sample) {
+            pose = parking_adas::integrate_pose_by_distance(
+                pose, leg.steering, leg.direction * step, vehicle.wheelbase, step);
+            const double target_speed = leg.direction > 0
+                ? std::min(vehicle.max_speed, 0.25)
+                : -std::min(vehicle.max_reverse_speed, 0.25);
+            path.push_back({pose.x, pose.y, leg.direction, pose.yaw, curvature,
+                            target_speed, false});
+        }
+        previous_direction = leg.direction;
+    }
+
+    if (!path.empty()) path.back().target_speed = 0.0;
+    return path;
+}
+
+struct TrajectoryTrackingError {
+    double cross_track = std::numeric_limits<double>::infinity();
+    double heading = std::numeric_limits<double>::infinity();
+};
+
+TrajectoryTrackingError error_to_trajectory(
+    const parking_adas::Pose& pose,
+    const std::vector<parking_adas::Waypoint>& path) {
+    TrajectoryTrackingError error;
+    for (std::size_t index = 1; index < path.size(); ++index) {
+        if (path[index - 1].direction != path[index].direction) continue;
+        const parking_adas::Waypoint& first = path[index - 1];
+        const parking_adas::Waypoint& second = path[index];
+        const double dx = second.x - first.x;
+        const double dy = second.y - first.y;
+        const double length_squared = dx * dx + dy * dy;
+        const double projection = length_squared > 1e-12
+            ? std::max(0.0, std::min(1.0,
+                ((pose.x - first.x) * dx + (pose.y - first.y) * dy) / length_squared))
+            : 0.0;
+        const double closest_x = first.x + projection * dx;
+        const double closest_y = first.y + projection * dy;
+        const double cross_track = std::hypot(pose.x - closest_x, pose.y - closest_y);
+        if (cross_track < error.cross_track) {
+            const double heading_delta = parking_adas::normalize_angle(
+                second.heading - first.heading);
+            error.cross_track = cross_track;
+            error.heading = std::abs(parking_adas::normalize_angle(
+                pose.yaw - first.heading - projection * heading_delta));
+        }
+    }
+    return error;
+}
+
+void require_tracker_tolerance(const TrackerCase& test_case) {
+    constexpr double dt = 0.05;
+    constexpr double max_cross_track_error = 0.25;
+    constexpr double max_path_heading_error = 0.35;
+    constexpr double terminal_position_tolerance = 0.20;
+    constexpr double terminal_heading_tolerance = 0.17453292519943295;
+    constexpr double terminal_speed_tolerance = 0.05;
+    constexpr int max_steps = 4000;
+
+    const parking_adas::VehicleParameters vehicle;
+    const std::vector<parking_adas::Waypoint> path =
+        make_test_trajectory(test_case.legs, vehicle, test_case.sample_spacing);
+    parking_adas::PurePursuitTrajectoryTracker tracker;
+    tracker.reset(path, vehicle);
+    parking_adas::VehicleState state{
+        path.front().x, path.front().y, path.front().heading, 0.0, 0.0, {}};
+    double maximum_cross_track_error = 0.0;
+    double maximum_path_heading_error = 0.0;
+    bool reached_terminal_pose = false;
+
+    for (int step = 0; step < max_steps; ++step) {
+        tracker.assess(state);
+        const parking_adas::MotionCommand command = tracker.command(state);
+        require(std::isfinite(command.acceleration) && std::isfinite(command.steering),
+                test_case.name + " produced a non-finite command");
+        require(std::abs(command.steering) <= vehicle.max_steering_angle + 1e-9,
+                test_case.name + " exceeded the steering limit");
+
+        state.velocity = std::max(-vehicle.max_reverse_speed,
+            std::min(vehicle.max_speed, state.velocity + command.acceleration * dt));
+        const double max_steering_delta = vehicle.max_steering_rate * dt;
+        const double steering_delta = std::max(-max_steering_delta,
+            std::min(max_steering_delta, command.steering - state.steering_angle));
+        state.steering_angle = std::max(-vehicle.max_steering_angle,
+            std::min(vehicle.max_steering_angle, state.steering_angle + steering_delta));
+
+        const parking_adas::Pose next = parking_adas::integrate_pose_by_distance(
+            {state.x, state.y, state.yaw}, state.steering_angle,
+            state.velocity * dt, vehicle.wheelbase, dt);
+        state.x = next.x;
+        state.y = next.y;
+        state.yaw = next.yaw;
+
+        const TrajectoryTrackingError tracking_error = error_to_trajectory(
+            {state.x, state.y, state.yaw}, path);
+        maximum_cross_track_error = std::max(
+            maximum_cross_track_error, tracking_error.cross_track);
+        maximum_path_heading_error = std::max(
+            maximum_path_heading_error, tracking_error.heading);
+        const parking_adas::Waypoint& goal = path.back();
+        const double terminal_distance = std::hypot(goal.x - state.x, goal.y - state.y);
+        const double terminal_heading_error = std::abs(
+            parking_adas::normalize_angle(goal.heading - state.yaw));
+        if (terminal_distance <= terminal_position_tolerance &&
+            terminal_heading_error <= terminal_heading_tolerance &&
+            std::abs(state.velocity) <= terminal_speed_tolerance) {
+            reached_terminal_pose = true;
+            break;
+        }
+    }
+
+    require(maximum_cross_track_error <= max_cross_track_error,
+            test_case.name + " exceeded the cross-track tolerance: " +
+                std::to_string(maximum_cross_track_error));
+    require(maximum_path_heading_error <= max_path_heading_error,
+            test_case.name + " exceeded the path-heading tolerance: " +
+                std::to_string(maximum_path_heading_error));
+    require(reached_terminal_pose,
+            test_case.name + " did not settle within the terminal pose tolerance");
 }
 
 parking_adas::PlanRequest base_request() {
@@ -362,6 +520,29 @@ void test_tracker_reverse_motion() {
     require(maximum_x <= 2.05, "reverse tracker moved forward beyond its starting pose");
 }
 
+void test_tracker_trajectory_families() {
+    const std::vector<TrackerCase> cases{
+        {"straight forward", {{1, 0.0, 3.0}}},
+        {"straight reverse", {{-1, 0.0, 3.0}}},
+        {"left arc forward", {{1, 0.30, 4.0}}},
+        {"left arc forward, dense", {{1, 0.30, 4.0}}, 0.05},
+        {"left arc forward, sparse", {{1, 0.30, 4.0}}, 0.40},
+        {"right arc forward", {{1, -0.30, 4.0}}},
+        {"left arc reverse", {{-1, 0.30, 4.0}}},
+        {"right arc reverse", {{-1, -0.30, 4.0}}},
+        {"forward S-curve", {{1, 0.24, 2.5}, {1, -0.24, 2.5}}},
+        {"reverse S-curve", {{-1, 0.24, 2.5}, {-1, -0.24, 2.5}}},
+        {"forward-reverse straight", {{1, 0.0, 2.0}, {-1, 0.0, 2.0}}},
+        {"reverse-forward curved", {{-1, 0.20, 2.0}, {1, -0.20, 2.0}}},
+        {"multi-gear maneuver", {
+            {1, 0.20, 2.0}, {-1, 0.20, 2.0}, {1, -0.20, 2.0}}},
+    };
+
+    for (const TrackerCase& test_case : cases) {
+        require_tracker_tolerance(test_case);
+    }
+}
+
 void test_stack_orchestration() {
     const parking_adas::PlanRequest request = base_request();
     parking_adas::ParkingAdasStack stack;
@@ -412,6 +593,7 @@ int main() {
         test_tracker_closed_loop();
         test_tracker_s_curve_divergence();
         test_tracker_reverse_motion();
+        test_tracker_trajectory_families();
         test_stack_orchestration();
         test_protocol();
     } catch (const std::exception& error) {
