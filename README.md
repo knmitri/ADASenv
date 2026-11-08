@@ -1,7 +1,7 @@
-# ParkingEnv
+# ADAS Environment
 
-ParkingEnv is a monorepo for developing ADAS assisted-parking stacks against a
-Python simulator.
+ADAS Environment is a monorepo for developing and comparing assisted-parking
+ADAS stacks against a Python simulator.
 
 The workspace has four top-level products:
 
@@ -112,7 +112,7 @@ python scripts/run_experiment.py --adas-stack hybrid_astar --slots 0
 After editable install:
 
 ```bash
-parking-experiment --adas-stack hybrid_astar --slots 0
+adas-experiment --adas-stack hybrid_astar --slots 0
 ```
 
 Run the default smoke catalog:
@@ -219,7 +219,7 @@ The future UI should sit on top of the same Python services:
 - scenario generation writes artifacts into `artifacts/scenarios`
 - scenario catalog view reads `artifacts/scenarios`
 - ADAS stack dropdown reads `catalogs/adas_stacks.json`
-- experiment launch calls the same runner logic used by `parking-experiment`
+- experiment launch calls the same runner logic used by `adas-experiment`
 - rendering can reuse `simulator.simulation.visualization`
 
 This keeps headless full-catalog tests and UI-triggered experiments on the same
