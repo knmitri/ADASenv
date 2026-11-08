@@ -1,4 +1,4 @@
-#include "parking_adas/planning/hybrid_a_star.hpp"
+#include "parking_adas/hybrid_astar/hybrid_a_star.hpp"
 
 #include <cmath>
 #include <chrono>
@@ -76,7 +76,7 @@ bool propagate(const Node& current, int direction, double target_steering,
 
 }  // namespace
 
-std::vector<Waypoint> HybridAStarPlanner::plan(const PlanRequest& request) const {
+std::vector<Waypoint> HybridAStarPlanner::plan(const PlanRequest& request) {
     const auto plan_start = std::chrono::steady_clock::now();
     diagnostics_ = {};
     diagnostics_.closest_goal_distance = std::hypot(
@@ -84,12 +84,21 @@ std::vector<Waypoint> HybridAStarPlanner::plan(const PlanRequest& request) const
     const CollisionChecker collision_checker(request);
     const ParkingGoalEvaluator goal_evaluator(request);
     const ReedsSheppConnector reeds_shepp_connector;
-    std::vector<Node> nodes{{{request.start_x, request.start_y, request.start_heading}, -1, 1, 0.0, 0.0, 0.0, 0.0}};
+    std::vector<Node> nodes{{
+        {request.start_x, request.start_y, request.start_heading},
+        -1,
+        request.start_direction,
+        request.start_steering,
+        request.start_velocity,
+        0.0,
+        0.0,
+    }};
     std::priority_queue<QueueItem> open;
 
     std::unordered_map<std::string, double> best;
     open.push({heuristic(nodes.front().pose, request.goal), 0});
-    best.emplace(key(nodes.front().pose, 1, nodes.front().velocity, nodes.front().steering), 0.0);
+    best.emplace(key(nodes.front().pose, nodes.front().direction,
+                     nodes.front().velocity, nodes.front().steering), 0.0);
     const std::vector<double> steering = {-request.vehicle.max_steering_angle, -0.5 * request.vehicle.max_steering_angle,
         0.0, 0.5 * request.vehicle.max_steering_angle, request.vehicle.max_steering_angle};
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(3000);

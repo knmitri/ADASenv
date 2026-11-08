@@ -164,7 +164,7 @@ def run_remote_slot(
             "world_min_y": float(sim.world_min_y),
             "world_max_x": float(scenario.lot.lot_width),
             "world_max_y": float(scenario.lot.lot_length),
-            "replan_position_threshold": 1.5,
+            "replan_position_threshold": 0.5,
             "replan_heading_threshold": 0.35,
             "goal_heading_tolerance": float(config["simulation"]["goal_heading_tolerance"]),
         },
@@ -484,7 +484,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--accept-timeout", type=float, default=120.0)
     parser.add_argument("--socket-timeout", type=float, default=30.0)
-    parser.add_argument("--adas-stack", default="reference_parking")
+    parser.add_argument("--adas-stack", default="hybrid_astar")
     parser.add_argument("--adas-stack-catalog", type=Path, default=DEFAULT_ADAS_STACK_CATALOG)
     parser.add_argument(
         "--wait-for-external-stack",

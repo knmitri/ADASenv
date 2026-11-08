@@ -68,6 +68,9 @@ struct PlanRequest {
     double start_x = 0.0;
     double start_y = 0.0;
     double start_heading = 0.0;
+    int start_direction = 1;
+    double start_velocity = 0.0;
+    double start_steering = 0.0;
     Pose goal;
     Footprint goal_slot_footprint;
     VehicleParameters vehicle;
@@ -94,6 +97,21 @@ struct PlanningDiagnostics {
     bool time_limited = false;
     bool solution_found = false;
     bool partial_plan = false;
+};
+
+struct CommandDiagnostics {
+    bool replanned = false;
+    bool safety_override = false;
+    const char* replan_reason = "none";
+};
+
+struct TrackingStatus {
+    bool trajectory_empty = false;
+    bool at_trajectory_end = false;
+    bool stalled = false;
+    double cross_track_error = 0.0;
+    double terminal_distance = 0.0;
+    double terminal_heading_error = 0.0;
 };
 
 }  // namespace parking_adas

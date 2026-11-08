@@ -16,7 +16,9 @@ std::string hello_response();
 std::string ready_response(const std::vector<parking_adas::Waypoint>& path);
 std::string ready_response(const std::vector<parking_adas::Waypoint>& path,
                            const parking_adas::PlanningDiagnostics& diagnostics);
-std::string command_response(parking_adas::MotionCommand command, const std::vector<parking_adas::Waypoint>& path);
+std::string command_response(parking_adas::MotionCommand command,
+                             const std::vector<parking_adas::Waypoint>& path,
+                             const parking_adas::CommandDiagnostics& diagnostics);
 std::string ack_response();
 std::string error_response(const std::string& message);
 

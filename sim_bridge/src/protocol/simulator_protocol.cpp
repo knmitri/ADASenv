@@ -150,12 +150,18 @@ std::string ready_response(const std::vector<parking_adas::Waypoint>& path,
     return out.str();
 }
 
-std::string command_response(parking_adas::MotionCommand command, const std::vector<parking_adas::Waypoint>& path) {
+std::string command_response(parking_adas::MotionCommand command,
+                             const std::vector<parking_adas::Waypoint>& path,
+                             const parking_adas::CommandDiagnostics& diagnostics) {
     std::ostringstream out;
     out << std::setprecision(12)
         << "{\"type\":\"command\",\"longitudinal_acceleration_mps2\":" << command.acceleration
         << ",\"front_mid_axle_steering_angle_rad\":" << command.steering
         << ",\"planned_path\":" << path_array(path)
+        << ",\"command_diagnostics\":{\"replanned\":"
+        << (diagnostics.replanned ? "true" : "false")
+        << ",\"safety_override\":" << (diagnostics.safety_override ? "true" : "false")
+        << ",\"replan_reason\":\"" << diagnostics.replan_reason << "\"}"
         << "}";
     return out.str();
 }

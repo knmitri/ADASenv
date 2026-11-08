@@ -6,11 +6,13 @@
 #include <vector>
 
 #include "parking_adas/common/math.hpp"
+#include "parking_adas/control/pure_pursuit_tracker.hpp"
 #include "parking_adas/control/trajectory_tracker.hpp"
 #include "parking_adas/planning/collision_checker.hpp"
-#include "parking_adas/planning/hybrid_a_star.hpp"
+#include "parking_adas/hybrid_astar/hybrid_a_star.hpp"
 #include "parking_adas/planning/parking_goal_evaluator.hpp"
 #include "parking_adas/planning/reeds_shepp_connector.hpp"
+#include "parking_adas/reeds_shepp_local/reeds_shepp_local_planner.hpp"
 #include "parking_adas/stack/parking_adas_stack.hpp"
 #include "sim_bridge/protocol/simulator_protocol.hpp"
 
@@ -70,7 +72,7 @@ void test_collision_checker() {
 
 void test_hybrid_a_star() {
     const parking_adas::PlanRequest request = base_request();
-    const parking_adas::HybridAStarPlanner planner;
+    parking_adas::HybridAStarPlanner planner;
     const std::vector<parking_adas::Waypoint> path = planner.plan(request);
     require(!path.empty(), "planner returned no path for an open request");
     for (const parking_adas::Waypoint& point : path) {
@@ -136,29 +138,47 @@ void test_reeds_shepp_connector() {
             "reverse Reeds-Shepp connection did not reach the goal pose");
 }
 
+void test_reeds_shepp_local_planner() {
+    const parking_adas::PlanRequest request = base_request();
+    parking_adas::ReedsSheppLocalPlanner planner;
+    const std::vector<parking_adas::Waypoint> path = planner.plan(request);
+    require(!path.empty(), "local Reeds-Shepp planner returned no open-space path");
+    require(planner.diagnostics().solution_found,
+            "local Reeds-Shepp planner did not report a solution");
+    require(path.front().x == request.start_x && path.front().y == request.start_y,
+            "local Reeds-Shepp planner did not retain the start pose");
+    parking_adas::ParkingGoalEvaluator goal_evaluator(request);
+    require(goal_evaluator.is_satisfied(
+                {path.back().x, path.back().y, path.back().heading}),
+            "local Reeds-Shepp planner endpoint does not satisfy the parking goal");
+}
+
 void test_tracker() {
+    const parking_adas::PlanRequest request = base_request();
     const std::vector<parking_adas::Waypoint> path{
         {0.0, 0.0, 1, 0.0, 0.0, 0.25, false},
         {1.0, 0.0, 1, 0.0, 0.0, 0.25, false},
         {2.0, 0.0, 1, 0.0, 0.0, 0.0, true},
         {1.0, 0.0, -1, 0.0, 0.0, -0.25, false},
     };
-    parking_adas::TrajectoryTracker tracker;
+    parking_adas::PurePursuitTrajectoryTracker tracker;
     parking_adas::VehicleParameters vehicle;
     tracker.reset(path, vehicle);
     const parking_adas::MotionCommand command = tracker.command({0.0, 0.0, 0.0, 0.0, 0.0, {}});
     require(command.acceleration > 0.0, "tracker did not command motion toward path");
     require(std::abs(command.steering) <= vehicle.max_steering_angle,
             "tracker exceeded steering limit");
-    require(tracker.needs_replan({5.0, 5.0, 0.0, 0.0, 0.0, {}}, 0.5, 0.5),
-            "tracker missed large position error");
-    parking_adas::TrajectoryTracker dynamic_obstacle_tracker;
+    parking_adas::HybridAStarPlanner replan_planner;
+    require(replan_planner.should_replan(
+                tracker.assess({5.0, 5.0, 0.0, 0.0, 0.0, {}}), request),
+            "planner missed large tracking error");
+    parking_adas::PurePursuitTrajectoryTracker dynamic_obstacle_tracker;
     dynamic_obstacle_tracker.reset(path, vehicle);
-    require(!dynamic_obstacle_tracker.needs_replan(
-                {0.0, 0.0, 0.0, 0.0, 0.0, {{{1.0, 1.0, 0.0, 1.0, 1.0, {}}}}},
-                0.5,
-                0.5),
-            "tracker replanned merely because a dynamic obstacle was reported");
+    require(!replan_planner.should_replan(
+                dynamic_obstacle_tracker.assess(
+                    {0.0, 0.0, 0.0, 0.0, 0.0, {{{1.0, 1.0, 0.0, 1.0, 1.0, {}}}}}),
+                request),
+            "planner replanned merely because a dynamic obstacle was reported");
 }
 
 void test_tracker_stops_before_gear_change() {
@@ -167,7 +187,7 @@ void test_tracker_stops_before_gear_change() {
         {1.0, 0.0, 1, 0.0, 0.0, 0.0, true},
         {0.8, 0.0, -1, 0.0, 0.0, -0.25, false},
     };
-    parking_adas::TrajectoryTracker tracker;
+    parking_adas::PurePursuitTrajectoryTracker tracker;
     parking_adas::VehicleParameters vehicle;
     tracker.reset(path, vehicle);
 
@@ -188,7 +208,7 @@ void test_tracker_closed_loop() {
         {1.0, 0.0, -1, 0.0, 0.0, -0.25, false},
         {-1.0, 0.0, -1, 0.0, 0.0, 0.0, false},
     };
-    parking_adas::TrajectoryTracker tracker;
+    parking_adas::PurePursuitTrajectoryTracker tracker;
     parking_adas::VehicleParameters vehicle;
     tracker.reset(path, vehicle);
 
@@ -242,7 +262,7 @@ void test_tracker_s_curve_divergence() {
     reverse_start.target_speed = 0.0;
     path.push_back(reverse_start);
 
-    parking_adas::TrajectoryTracker tracker;
+    parking_adas::PurePursuitTrajectoryTracker tracker;
     parking_adas::VehicleParameters vehicle;
     tracker.reset(path, vehicle);
 
@@ -287,7 +307,7 @@ void test_tracker_reverse_motion() {
         {-3.0, -0.6, -1, 0.3, -0.2, -0.25, false},
         {-4.0, -1.0, -1, 0.4, -0.2, 0.0, false},
     };
-    parking_adas::TrajectoryTracker curved_tracker;
+    parking_adas::PurePursuitTrajectoryTracker curved_tracker;
     parking_adas::VehicleParameters vehicle;
     curved_tracker.reset(curved_reverse_path, vehicle);
     const parking_adas::MotionCommand curved_command =
@@ -300,7 +320,7 @@ void test_tracker_reverse_motion() {
         {1.0, 0.0, -1, 0.0, 0.0, -0.25, false},
         {0.0, 0.0, -1, 0.0, 0.0, 0.0, false},
     };
-    parking_adas::TrajectoryTracker tracker;
+    parking_adas::PurePursuitTrajectoryTracker tracker;
     tracker.reset(reverse_path, vehicle);
 
     parking_adas::VehicleState state{2.0, 0.0, 0.0, 0.0, 0.0, {}};
@@ -373,6 +393,7 @@ int main() {
         test_collision_checker();
         test_hybrid_a_star();
         test_reeds_shepp_connector();
+        test_reeds_shepp_local_planner();
         test_tracker();
         test_tracker_stops_before_gear_change();
         test_tracker_closed_loop();

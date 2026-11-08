@@ -4,22 +4,32 @@ project(ParkingEnv LANGUAGES CXX)
 
 enable_testing()
 
+add_library(parking_motion_api INTERFACE)
+target_include_directories(parking_motion_api INTERFACE motion_api/include)
+target_compile_features(parking_motion_api INTERFACE cxx_std_17)
+
 add_library(
   reference_parking_stack STATIC
-  adas_stack/src/common/math.cpp
-  adas_stack/src/common/footprint_geometry.cpp
-  adas_stack/src/control/trajectory_tracker.cpp
-  adas_stack/src/planning/parking_adas_stack.cpp
-  adas_stack/src/planning/collision_checker.cpp
-  adas_stack/src/planning/parking_goal_evaluator.cpp
-  adas_stack/src/planning/reeds_shepp_connector.cpp
-  adas_stack/src/planning/hybrid_a_star.cpp
+  reference_adas_stacks/core/src/common/math.cpp
+  reference_adas_stacks/core/src/common/footprint_geometry.cpp
+  reference_adas_stacks/core/src/control/trajectory_tracker.cpp
+  reference_adas_stacks/core/src/control/pure_pursuit_tracker.cpp
+  reference_adas_stacks/core/src/planning/parking_adas_stack.cpp
+  reference_adas_stacks/core/src/planning/path_planner.cpp
+  reference_adas_stacks/core/src/planning/collision_checker.cpp
+  reference_adas_stacks/core/src/planning/parking_goal_evaluator.cpp
+  reference_adas_stacks/core/src/planning/reeds_shepp_connector.cpp
+  reference_adas_stacks/core/src/planning/trajectory_generator.cpp
+  reference_adas_stacks/core/src/planning/trajectory_optimizer.cpp
+  reference_adas_stacks/src/reeds_shepp_local/reeds_shepp_local_planner.cpp
+  reference_adas_stacks/src/hybrid_astar/hybrid_a_star.cpp
 )
 
 target_include_directories(
   reference_parking_stack
-  PUBLIC adas_stack/include
+  PUBLIC reference_adas_stacks/core/include reference_adas_stacks/include
 )
+target_link_libraries(reference_parking_stack PUBLIC parking_motion_api)
 target_compile_features(reference_parking_stack PUBLIC cxx_std_17)
 
 add_executable(

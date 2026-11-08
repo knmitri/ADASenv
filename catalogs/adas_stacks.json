@@ -1,11 +1,18 @@
 {
   "stacks": [
     {
-      "id": "reference_parking",
-      "name": "Reference Parking ADAS Stack",
-      "description": "Reference parking ADAS core wrapped by the TCP JSON simulator bridge.",
+      "id": "hybrid_astar",
+      "name": "Hybrid A* Parking Stack",
+      "description": "Reference Hybrid A* parking planner wrapped by the TCP JSON simulator bridge.",
       "executable": "build/Release/tcp_json_sim_bridge.exe",
-      "args": ["--tcp-client", "--host", "{host}", "--port", "{port}"]
+      "args": ["--tcp-client", "--path-planner", "hybrid_astar", "--trajectory-tracker", "pure_pursuit", "--host", "{host}", "--port", "{port}"]
+    },
+    {
+      "id": "reeds_shepp_local",
+      "name": "Reeds-Shepp Local Parking Stack",
+      "description": "Direct Reeds-Shepp local-planner reference wrapped by the TCP JSON simulator bridge.",
+      "executable": "build/Release/tcp_json_sim_bridge.exe",
+      "args": ["--tcp-client", "--path-planner", "reeds_shepp_local", "--trajectory-tracker", "pure_pursuit", "--host", "{host}", "--port", "{port}"]
     }
   ]
 }

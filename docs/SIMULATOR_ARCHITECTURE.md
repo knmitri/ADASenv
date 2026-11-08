@@ -55,14 +55,14 @@ to ignored `artifacts/traces/` JSONL files.
 Run the full catalog headlessly for fast feedback:
 
 ```powershell
-python -m simulator.experiment_runner --adas-stack reference_parking --scenario-suite all --port 0
+python -m simulator.experiment_runner --adas-stack hybrid_astar --scenario-suite all --port 0
 ```
 
 Inspect a single case with visualisation and a trace:
 
 ```powershell
 python -m simulator.experiment_runner `
-  --adas-stack reference_parking `
+  --adas-stack hybrid_astar `
   --scenario-artifact artifacts/scenarios/smoke/empty_perpendicular.json `
   --render `
   --trace-dir artifacts/traces `

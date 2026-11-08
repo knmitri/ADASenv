@@ -1,7 +1,9 @@
 # ADAS Stack Architecture
 
-This document covers only `adas_stack/`: portable C++ parking behavior that
-can later live behind a vehicle middleware adapter. It deliberately has no
+This document covers the shared C++ stack core in `reference_adas_stacks/core/`
+and the vehicle-level contract in `motion_api/`, plus the selectable reference
+implementations in `reference_adas_stacks/`. These components can later live
+behind a vehicle middleware adapter. They deliberately have no
 knowledge of TCP, JSON, Python, scenario files, or rendering. Those concerns
 are documented in the [simulation bridge](SIM_BRIDGE_ARCHITECTURE.md) and
 [simulator](SIMULATOR_ARCHITECTURE.md) guides.
@@ -28,21 +30,27 @@ acceleration in m/s^2 and front mid-axle steering angle in radians.
 | Common | `common/footprint_geometry.*` | Vehicle and obstacle footprints plus convex-polygon operations. It is shared so collision and goal semantics cannot drift. |
 | Planning | `planning/collision_checker.*` | Safety only: bounds and inflated-footprint collision checks. |
 | Planning | `planning/parking_goal_evaluator.*` | Completion only: whole uninflated vehicle must be inside the goal slot and within its heading tolerance. |
-| Planning | `planning/hybrid_a_star.*` | Forward/reverse kinematic search, collision-safe expansion, and the provisional-prefix fallback. |
+| Planning | `planning/path_planner.*` | `PathPlanner` interface and planner factory. The stack depends on this abstraction, not on a search algorithm. |
+| Planning | `planning/hybrid_a_star.*` | `hybrid_astar`: forward/reverse kinematic search, collision-safe expansion, and the provisional-prefix fallback. |
+| Planning | `planning/reeds_shepp_local_planner.*` | `reeds_shepp_local`: direct local connection reference for open-space comparisons. |
 | Planning | `planning/reeds_shepp_connector.*` | Builds and validates low-speed final connections from canonical forward/reverse arc and straight-segment words. |
+| Planning | `planning/trajectory_generator.*` | Converts a geometric path into a direction-aware speed profile and explicit gear-change stops. |
+| Planning | `planning/trajectory_optimizer.*` | Applies kinematic limits without changing the collision-checked path geometry. |
 | Stack | `planning/parking_adas_stack.cpp`, `stack/parking_adas_stack.hpp` | Orchestrates planning, trajectory construction, tracking, safety prediction, and replan requests. |
-| Control | `control/trajectory_tracker.*` | Direction-aware low-speed tracking, gear-change stops, and divergence/stall detection. |
+| Control | `control/trajectory_tracker.*` | `TrajectoryTracker` interface and tracker factory. It reports tracking state but does not own replanning policy. |
+| Control | `control/pure_pursuit_tracker.*` | `pure_pursuit` reference tracker implementation. |
 
 ## Internal Flow
 
 ```mermaid
 flowchart LR
-    request[PlanRequest] --> planner[HybridAStarPlanner]
+    request[PlanRequest] --> planner[PathPlanner]
     planner --> collision[CollisionChecker]
     planner --> goal[ParkingGoalEvaluator]
     planner --> path[Path: Waypoint list]
-    path --> trajectory[Trajectory generation]
-    trajectory --> tracker[TrajectoryTracker]
+    path --> trajectory[TrajectoryGenerator]
+    trajectory --> optimizer[TrajectoryOptimizer]
+    optimizer --> tracker[TrajectoryTracker]
     state[VehicleState] --> tracker
     tracker --> safety[One-step safety prediction]
     safety --> command[MotionCommand]
@@ -74,7 +82,7 @@ planning.
 
 ## Planner and Tracker Behavior
 
-`HybridAStarPlanner` expands forward and reverse bicycle-model primitives and
+`PathPlanner` is the comparison boundary. `hybrid_astar` expands forward and reverse bicycle-model primitives and
 checks the full vehicle footprint after propagation. Near the target it asks
 `ReedsSheppConnector` for the lowest-cost collision-free candidate it finds from
 left/right maximum-curvature arcs and straight segments, including gear
@@ -88,22 +96,33 @@ The terminal handoff starts within 3 m of the target and can evaluate several
 candidate search nodes. This lets the connector reject colliding local routes
 without turning the first near-goal node into a single point of failure.
 
-Trajectory generation preserves the planner's collision-checked poses and
+`reeds_shepp_local` is a second reference implementation. It asks the local
+connector to directly join the initial pose to the slot-valid terminal pose; it
+is useful for comparison, but does not search around obstacles.
+
+`TrajectoryGenerator` preserves the planner's collision-checked poses and
 curvatures, then assigns direction-aware low-speed targets and stops at gear
-changes. `TrajectoryTracker` computes bounded desired steering with
-direction-aware look-ahead and heading feedback, and requests a new plan when
-terminal pose recovery stalls.
+changes. `TrajectoryOptimizer` applies speed and curvature limits without
+creating a second path. `TrajectoryTracker` computes bounded desired steering with
+direction-aware look-ahead and heading feedback. It reports `TrackingStatus`
+(cross-track error, terminal progress, and stalls); `PathPlanner::should_replan`
+owns the decision to replace a trajectory.
 
 ## Contributor Guide
 
+For the implementation-focused workflow, start with the [planner and tracker
+contributor guide](PLANNER_TRACKER_CONTRIBUTOR_GUIDE.md). It limits the required
+surface to the public planning and tracking interfaces.
+
 ### Add or replace a planner
 
-1. Work in `adas_stack/planning/` and preserve `PlanRequest -> vector<Waypoint>`.
+1. Derive from `PathPlanner` in `reference_adas_stacks/core/include/` and preserve `PlanRequest -> vector<Waypoint>`.
 2. Call `CollisionChecker` for every propagated candidate.
 3. Use `ParkingGoalEvaluator` for terminal acceptance; do not add goal rules to
    collision code.
 4. Keep propagation consistent with the existing C++ bicycle helper.
-5. Add focused C++ coverage and run the model-parity test.
+5. Register its factory ID in `path_planner.cpp` and `catalogs/adas_stacks.json`.
+6. Add focused C++ coverage and run the model-parity test.
 
 ### Change tracking
 

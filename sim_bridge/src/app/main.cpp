@@ -12,8 +12,12 @@ namespace sim_bridge {
 int run_tcp_client(int argc, char** argv) {
     const std::string host = arg_value(argc, argv, "--host", "127.0.0.1");
     const std::string port = arg_value(argc, argv, "--port", "8765");
+    const std::string planner_id = arg_value(argc, argv, "--path-planner", "hybrid_astar");
+    const std::string tracker_id = arg_value(argc, argv, "--trajectory-tracker", "pure_pursuit");
 
-    parking_adas::ParkingAdasStack stack;
+    parking_adas::ParkingAdasStack stack(
+        parking_adas::make_path_planner(planner_id),
+        parking_adas::make_trajectory_tracker(tracker_id));
     TcpClient client;
     client.connect_to(host, port);
 
@@ -27,7 +31,9 @@ int run_tcp_client(int argc, char** argv) {
                 client.write_line(ready_response(
                     stack.reset(parse_reset_request(line)), stack.planning_diagnostics()));
             } else if (type == "state") {
-                client.write_line(command_response(stack.command(parse_state_request(line)), stack.trajectory()));
+                client.write_line(command_response(
+                    stack.command(parse_state_request(line)), stack.trajectory(),
+                    stack.command_diagnostics()));
             } else if (type == "result") {
                 client.write_line(ack_response());
             } else if (type == "shutdown") {
