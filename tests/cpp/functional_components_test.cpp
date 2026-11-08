@@ -179,6 +179,19 @@ void test_tracker() {
                     {0.0, 0.0, 0.0, 0.0, 0.0, {{{1.0, 1.0, 0.0, 1.0, 1.0, {}}}}}),
                 request),
             "planner replanned merely because a dynamic obstacle was reported");
+
+    parking_adas::TrackingStatus terminal_status;
+    terminal_status.at_trajectory_end = true;
+    terminal_status.terminal_distance = 0.1;
+    require(replan_planner.should_replan(terminal_status, request),
+            "planner did not replan after missing the terminal position");
+    terminal_status.terminal_distance = 0.0;
+    terminal_status.terminal_heading_error = 0.1;
+    require(replan_planner.should_replan(terminal_status, request),
+            "planner did not replan after missing the terminal heading");
+    terminal_status.terminal_heading_error = 0.01;
+    require(!replan_planner.should_replan(terminal_status, request),
+            "planner replanned despite reaching the terminal pose");
 }
 
 void test_tracker_stops_before_gear_change() {

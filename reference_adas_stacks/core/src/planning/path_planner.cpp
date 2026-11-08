@@ -12,8 +12,8 @@ bool PathPlanner::should_replan(const TrackingStatus& status,
     if (status.trajectory_empty || status.stalled) return true;
     if (status.cross_track_error > request.replan_position_threshold) return true;
     if (!status.at_trajectory_end) return false;
-    return status.terminal_distance < 0.08 &&
-        status.terminal_heading_error < 0.05;
+    return status.terminal_distance > 0.08 ||
+        status.terminal_heading_error > 0.05;
 }
 
 std::unique_ptr<PathPlanner> make_path_planner(const std::string& planner_id) {
