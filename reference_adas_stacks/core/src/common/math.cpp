@@ -13,6 +13,11 @@ double normalize_angle(double angle) {
     return std::atan2(std::sin(angle), std::cos(angle));
 }
 
+double curvature_from_steering_angle(double steering_angle_radians,
+                                     double wheelbase_metres) {
+    return std::tan(steering_angle_radians) / wheelbase_metres;
+}
+
 Pose integrate_pose_by_distance(
     Pose pose,
     double steering,

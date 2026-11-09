@@ -26,14 +26,15 @@ acceleration in m/s^2 and front mid-axle steering angle in radians.
 | Area | Key files | Responsibility |
 | --- | --- | --- |
 | Domain | `domain/types.hpp` | Vehicle-neutral data: poses, waypoints, requests, obstacles, diagnostics, and commands. A `Waypoint` is the one motion artifact shared by planning, tracking, and external adapters. |
-| Common | `common/math.*` | Angle, clamp, and kinematic-bicycle integration helpers. |
+| Common | `common/math.*` | Angle, clamp, bicycle integration, and steering-to-curvature helpers. |
 | Common | `common/footprint_geometry.*` | Vehicle and obstacle footprints plus convex-polygon operations. It is shared so collision and goal semantics cannot drift. |
 | Planning | `planning/collision_scene.*` | Builds and validates an immutable snapshot of vehicle geometry, world bounds, clearance, and static obstacle polygons from a `PlanRequest`. |
 | Planning | `planning/collision_checker.*` | Safety queries only: point and swept collision checks against a shared `CollisionScene`. |
 | Planning | `planning/parking_goal_evaluator.*` | Completion only: whole uninflated vehicle must be inside the goal slot and within its heading tolerance. |
+| Planning | `planning/planning_context.*` | Owns one immutable `PlanRequest` snapshot and creates the matching scene, checker, and goal evaluator once for a planning operation. |
 | Planning | `planning/path_planner.*` | `PathPlanner` interface and planner factory. The stack depends on this abstraction, not on a search algorithm. |
-| Planning | `planning/hybrid_a_star.*` | `hybrid_astar`: forward/reverse kinematic search, collision-safe expansion, and the provisional-prefix fallback. |
-| Planning | `planning/reeds_shepp_local_planner.*` | `reeds_shepp_local`: direct local connection reference for open-space comparisons. |
+| Planning | `src/hybrid_astar/hybrid_a_star.*` | `hybrid_astar`: forward/reverse kinematic search, collision-safe expansion, and the provisional-prefix fallback. |
+| Planning | `src/reeds_shepp_local/reeds_shepp_local_planner.*` | `reeds_shepp_local`: direct local connection reference for open-space comparisons. |
 | Planning | `planning/reeds_shepp_connector.*`, `planning/reeds_shepp_analytic.cpp` | Enumerates analytical Reeds–Shepp candidates, collision-checks them shortest-first, and retains the prior numerical connector as a selectable fallback. |
 | Planning | `planning/trajectory_generator.*` | Converts a geometric path into a direction-aware speed profile and explicit gear-change stops. |
 | Planning | `planning/trajectory_optimizer.*` | Applies kinematic limits without changing the collision-checked path geometry. |
@@ -46,9 +47,11 @@ acceleration in m/s^2 and front mid-axle steering angle in radians.
 ```mermaid
 flowchart LR
     request[PlanRequest] --> planner[PathPlanner]
-    planner --> scene[CollisionScene]
+    planner --> context[PlanningContext request snapshot]
+    context --> scene[CollisionScene]
     scene --> collision[CollisionChecker queries]
-    planner --> goal[ParkingGoalEvaluator]
+    context --> goal[ParkingGoalEvaluator]
+    context --> connector[ReedsSheppConnector]
     planner --> path[Path: Waypoint list]
     path --> trajectory[TrajectoryGenerator]
     trajectory --> optimizer[TrajectoryOptimizer]
@@ -82,6 +85,24 @@ width.
 Keeping these as two collaborators is intentional: collision avoidance and
 parking success have different questions, thresholds, and callers. Neither
 should carry hidden rules for the other.
+
+Each planner implementation constructs a non-copyable `PlanningContext` at the
+start of `plan()`. It snapshots the request once, builds the `CollisionScene`
+from that snapshot, and creates the matching checker and goal evaluator. The
+connector receives the context instead of separately supplied request,
+checker, and evaluator objects, preventing accidental mixing of data from
+different requests. The goal evaluator stores only the goal pose, slot
+footprint, vehicle parameters, and heading tolerance rather than copying the
+whole request.
+`common/math` shares the direct steering-to-curvature conversion across
+planners and the trajectory optimizer. The sampled bicycle integrator is
+intentionally not unified with the exact constant-curvature integration used
+by Reeds–Shepp: their numerical behavior and parity requirements differ.
+
+The public `PathPlanner::plan(const PlanRequest&)` boundary remains unchanged.
+`ParkingAdasStack` still stores its request for replanning and builds a
+zero-clearance context for the one-step safety query, which includes the latest
+dynamic obstacles.
 
 The analytical Reeds–Shepp connector uses a conservative swept-footprint
 check between poses. For each subinterval it bounds any footprint point's
@@ -138,9 +159,10 @@ without turning the first near-goal node into a single point of failure.
 `reeds_shepp_local` is a second reference implementation. It asks the local
 connector to directly join the initial pose to the slot-valid terminal pose; it
 is useful for comparison, but does not search around obstacles. The analytical
-connector remains opt-in until its optional OMPL distance-comparison test has
-passed on the target build. See the [analytical Reeds–Shepp design](REEDS_SHEPP_ANALYTIC.md)
-for equations, candidate semantics, and validation status.
+connector remains opt-in by default even though its optional OMPL
+distance-comparison test has passed. See the
+[analytical Reeds–Shepp design](REEDS_SHEPP_ANALYTIC.md) for equations,
+candidate semantics, and validation status.
 
 `TrajectoryGenerator` preserves the planner's collision-checked poses and
 curvatures, then assigns direction-aware low-speed targets and stops at gear
@@ -149,6 +171,22 @@ creating a second path. `TrajectoryTracker` computes bounded desired steering wi
 direction-aware look-ahead and heading feedback. It reports `TrackingStatus`
 (cross-track error, terminal progress, and stalls); `PathPlanner::should_replan`
 owns the decision to replace a trajectory.
+
+### Configuration and fixed parameters
+
+`PlanRequest` supplies the integration timestep, position replan threshold, and
+goal-heading tolerance. The currently declared `replan_heading_threshold` is
+not consumed: terminal replanning instead uses fixed thresholds of 0.08 m and
+0.05 rad in `PathPlanner::should_replan`. This mismatch is preserved rather
+than silently changing behavior.
+
+Hybrid A* search resolution (0.35 m position, 0.26 rad heading, and 0.1 bins
+for velocity and steering), primitive duration and target speed, steering
+primitive set, costs, goal-connection limits, and 3-second/15,000-expansion
+budgets remain fixed implementation parameters. Their existing values are
+named in the planner source but have not been moved into runtime configuration.
+The numerical Reeds–Shepp connector remains the default; the analytical
+implementation is selectable by CMake or explicitly by the API.
 
 ## Contributor Guide
 

@@ -6,8 +6,7 @@
 #include <limits>
 
 #include "parking_adas/common/math.hpp"
-#include "parking_adas/planning/collision_checker.hpp"
-#include "parking_adas/planning/parking_goal_evaluator.hpp"
+#include "parking_adas/planning/planning_context.hpp"
 
 namespace parking_adas {
 namespace {
@@ -193,13 +192,12 @@ std::vector<std::vector<double>> seeds(std::size_t segment_count, double distanc
 }
 
 bool sample_candidate(const Candidate& candidate, const Pose& start,
-                      const PlanRequest& request,
-                      const CollisionChecker& collision_checker,
-                      const ParkingGoalEvaluator& goal_evaluator,
+                      const PlanningContext& context,
                       std::vector<Waypoint>& result) {
+    const PlanRequest& request = context.request();
     Pose pose = start;
-    const double max_curvature = std::tan(request.vehicle.max_steering_angle) /
-        request.vehicle.wheelbase;
+    const double max_curvature = curvature_from_steering_angle(
+        request.vehicle.max_steering_angle, request.vehicle.wheelbase);
     std::vector<Waypoint> sampled;
     for (const Segment& segment : candidate.segments) {
         if (segment.length < 1e-4) continue;
@@ -208,7 +206,7 @@ bool sample_candidate(const Candidate& candidate, const Pose& start,
         for (int index = 0; index < samples; ++index) {
             pose = integrate_segment(
                 pose, segment.curvature_sign * max_curvature, segment.direction * step);
-            if (collision_checker.is_collision(pose)) return false;
+            if (context.collision_checker().is_collision(pose)) return false;
             sampled.push_back({
                 pose.x, pose.y, segment.direction, pose.yaw,
                 segment.curvature_sign * max_curvature,
@@ -217,7 +215,7 @@ bool sample_candidate(const Candidate& candidate, const Pose& start,
             });
         }
     }
-    if (sampled.empty() || !goal_evaluator.is_satisfied(pose)) return false;
+    if (sampled.empty() || !context.goal_evaluator().is_satisfied(pose)) return false;
     result = std::move(sampled);
     return true;
 }
@@ -228,11 +226,10 @@ bool ReedsSheppConnector::connect_numerical(
     const Pose& start,
     const Pose& goal,
     int initial_direction,
-    const PlanRequest& request,
-    const CollisionChecker& collision_checker,
-    const ParkingGoalEvaluator& goal_evaluator,
+    const PlanningContext& context,
     const std::chrono::steady_clock::time_point& deadline,
     std::vector<Waypoint>& result) const {
+    const PlanRequest& request = context.request();
     const double max_curvature = std::tan(request.vehicle.max_steering_angle) /
         request.vehicle.wheelbase;
     if (max_curvature <= 1e-9) return false;
@@ -267,8 +264,8 @@ bool ReedsSheppConnector::connect_numerical(
                 }
                 Candidate candidate{std::move(segments), cost};
                 std::vector<Waypoint> sampled;
-                if (candidate.cost < best.cost && sample_candidate(
-                        candidate, start, request, collision_checker, goal_evaluator, sampled)) {
+                if (candidate.cost < best.cost &&
+                    sample_candidate(candidate, start, context, sampled)) {
                     best = std::move(candidate);
                     result = std::move(sampled);
                 }

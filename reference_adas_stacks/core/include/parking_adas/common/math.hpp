@@ -8,6 +8,8 @@ constexpr double kPi = 3.14159265358979323846;
 
 double clamp_value(double value, double low, double high);
 double normalize_angle(double angle);
+double curvature_from_steering_angle(double steering_angle_radians,
+                                     double wheelbase_metres);
 
 Pose integrate_pose_by_distance(
     Pose pose,

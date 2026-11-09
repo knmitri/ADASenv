@@ -46,6 +46,7 @@ add_library(
   reference_adas_stacks/core/src/planning/collision_scene.cpp
   reference_adas_stacks/core/src/planning/collision_checker.cpp
   reference_adas_stacks/core/src/planning/parking_goal_evaluator.cpp
+  reference_adas_stacks/core/src/planning/planning_context.cpp
   reference_adas_stacks/core/src/planning/reeds_shepp_connector.cpp
   reference_adas_stacks/core/src/planning/reeds_shepp_analytic.cpp
   reference_adas_stacks/core/src/planning/trajectory_generator.cpp

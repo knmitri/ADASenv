@@ -2,17 +2,65 @@
 
 #include <cmath>
 #include <chrono>
+#include <cstddef>
+#include <functional>
 #include <queue>
-#include <string>
 #include <unordered_map>
 
 #include "parking_adas/common/math.hpp"
 #include "parking_adas/planning/collision_checker.hpp"
-#include "parking_adas/planning/parking_goal_evaluator.hpp"
+#include "parking_adas/planning/planning_context.hpp"
 #include "parking_adas/planning/reeds_shepp_connector.hpp"
 
 namespace parking_adas {
 namespace {
+constexpr double kPositionBinSize = 0.35;
+constexpr double kHeadingBinSize = 0.26;
+constexpr double kVelocityBinSize = 0.1;
+constexpr double kSteeringBinSize = 0.1;
+constexpr double kHeadingHeuristicWeight = 1.2;
+constexpr double kPrimitiveDurationSeconds = 0.5;
+constexpr double kTargetSpeedMagnitude = 0.5;
+constexpr double kDirectionChangeDistance = 1.0;
+constexpr double kDirectionChangeCost = 4.0;
+constexpr double kSteeringCostWeight = 0.08;
+constexpr double kGoalConnectionDistance = 3.0;
+constexpr double kGoalConnectionHeadingTolerance = 2.4;
+constexpr int kMaxGoalConnectionAttempts = 8;
+constexpr int kMaxExpandedNodes = 15000;
+constexpr auto kPlanningTimeLimit = std::chrono::milliseconds(3000);
+
+struct StateKey {
+    int x;
+    int y;
+    int heading;
+    int direction;
+    int velocity;
+    int steering;
+
+    bool operator==(const StateKey& other) const {
+        return x == other.x && y == other.y && heading == other.heading &&
+            direction == other.direction && velocity == other.velocity &&
+            steering == other.steering;
+    }
+};
+
+struct StateKeyHash {
+    std::size_t operator()(const StateKey& state) const {
+        std::size_t seed = std::hash<int>{}(state.x);
+        const auto combine = [&seed](int value) {
+            seed ^= std::hash<int>{}(value) + 0x9e3779b9U +
+                (seed << 6) + (seed >> 2);
+        };
+        combine(state.y);
+        combine(state.heading);
+        combine(state.direction);
+        combine(state.velocity);
+        combine(state.steering);
+        return seed;
+    }
+};
+
 struct Node {
     Pose pose;
     int parent;
@@ -24,26 +72,29 @@ struct Node {
 };
 struct QueueItem { double score; int index; bool operator<(const QueueItem& other) const { return score > other.score; } };
 
-std::string key(const Pose& pose, int direction, double velocity, double steering) {
-    return std::to_string(static_cast<int>(std::round(pose.x / 0.35))) + ":" +
-           std::to_string(static_cast<int>(std::round(pose.y / 0.35))) + ":" +
-           std::to_string(static_cast<int>(std::round(normalize_angle(pose.yaw) / 0.26))) + ":" +
-           std::to_string(direction) + ":" +
-           std::to_string(static_cast<int>(std::round(velocity / 0.1))) + ":" +
-           std::to_string(static_cast<int>(std::round(steering / 0.1)));
+StateKey state_key(const Pose& pose, int direction, double velocity, double steering) {
+    return {
+        static_cast<int>(std::round(pose.x / kPositionBinSize)),
+        static_cast<int>(std::round(pose.y / kPositionBinSize)),
+        static_cast<int>(std::round(normalize_angle(pose.yaw) / kHeadingBinSize)),
+        direction,
+        static_cast<int>(std::round(velocity / kVelocityBinSize)),
+        static_cast<int>(std::round(steering / kSteeringBinSize)),
+    };
 }
 
 double heuristic(const Pose& pose, const Pose& goal) {
-    return std::hypot(goal.x - pose.x, goal.y - pose.y) + 1.2 * std::abs(normalize_angle(goal.yaw - pose.yaw));
+    return std::hypot(goal.x - pose.x, goal.y - pose.y) +
+        kHeadingHeuristicWeight * std::abs(normalize_angle(goal.yaw - pose.yaw));
 }
 
 bool propagate(const Node& current, int direction, double target_steering,
                const PlanRequest& request, const CollisionChecker& checker,
-               Node& next, double primitive_duration = 0.5) {
+               Node& next, double primitive_duration = kPrimitiveDurationSeconds) {
     const int steps = std::max(1, static_cast<int>(std::ceil(primitive_duration / request.dt)));
     const double target_speed = direction > 0
-        ? std::min(request.vehicle.max_speed, 0.5)
-        : -std::min(request.vehicle.max_reverse_speed, 0.5);
+        ? std::min(request.vehicle.max_speed, kTargetSpeedMagnitude)
+        : -std::min(request.vehicle.max_reverse_speed, kTargetSpeedMagnitude);
     next = current;
     next.direction = direction;
     next.steering = current.steering;
@@ -76,14 +127,13 @@ bool propagate(const Node& current, int direction, double target_steering,
 
 }  // namespace
 
-std::vector<Waypoint> HybridAStarPlanner::plan(const PlanRequest& request) {
+std::vector<Waypoint> HybridAStarPlanner::plan(const PlanRequest& input_request) {
+    const PlanningContext context(input_request);
+    const PlanRequest& request = context.request();
     const auto plan_start = std::chrono::steady_clock::now();
     diagnostics_ = {};
     diagnostics_.closest_goal_distance = std::hypot(
         request.start_x - request.goal.x, request.start_y - request.goal.y);
-    const CollisionScene collision_scene(request);
-    const CollisionChecker collision_checker(collision_scene);
-    const ParkingGoalEvaluator goal_evaluator(request);
     const ReedsSheppConnector reeds_shepp_connector;
     std::vector<Node> nodes{{
         {request.start_x, request.start_y, request.start_heading},
@@ -96,15 +146,14 @@ std::vector<Waypoint> HybridAStarPlanner::plan(const PlanRequest& request) {
     }};
     std::priority_queue<QueueItem> open;
 
-    std::unordered_map<std::string, double> best;
+    std::unordered_map<StateKey, double, StateKeyHash> best;
     open.push({heuristic(nodes.front().pose, request.goal), 0});
-    best.emplace(key(nodes.front().pose, nodes.front().direction,
-                     nodes.front().velocity, nodes.front().steering), 0.0);
+    best.emplace(state_key(nodes.front().pose, nodes.front().direction,
+                           nodes.front().velocity, nodes.front().steering), 0.0);
     const std::vector<double> steering = {-request.vehicle.max_steering_angle, -0.5 * request.vehicle.max_steering_angle,
         0.0, 0.5 * request.vehicle.max_steering_angle, request.vehicle.max_steering_angle};
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(3000);
+    const auto deadline = std::chrono::steady_clock::now() + kPlanningTimeLimit;
     int goal_connection_attempts = 0;
-    constexpr int max_goal_connection_attempts = 8;
     int best_index = 0;
     double best_goal_score = heuristic(nodes.front().pose, request.goal);
     const auto path_to = [&](int terminal_index) {
@@ -112,13 +161,16 @@ std::vector<Waypoint> HybridAStarPlanner::plan(const PlanRequest& request) {
         for (int index = terminal_index; index >= 0; index = nodes.at(index).parent) {
             const Node& node = nodes.at(index);
             path.push_back({node.pose.x, node.pose.y, node.direction, node.pose.yaw,
-                            std::tan(node.steering) / request.vehicle.wheelbase, node.velocity});
+                            curvature_from_steering_angle(
+                                node.steering, request.vehicle.wheelbase),
+                            node.velocity});
         }
         std::reverse(path.begin(), path.end());
         return path;
     };
     for (int expanded = 0;
-         !open.empty() && expanded < 15000 && std::chrono::steady_clock::now() < deadline;
+         !open.empty() && expanded < kMaxExpandedNodes &&
+             std::chrono::steady_clock::now() < deadline;
          ++expanded) {
         const int current_index = open.top().index;
         const Node current = nodes.at(current_index); open.pop();
@@ -134,13 +186,14 @@ std::vector<Waypoint> HybridAStarPlanner::plan(const PlanRequest& request) {
         }
         const double goal_heading_error = std::abs(
             normalize_angle(current.pose.yaw - request.goal.yaw));
-        if (goal_distance < 3.0 && goal_heading_error < 2.4 &&
-            goal_connection_attempts++ < max_goal_connection_attempts) {
+        if (goal_distance < kGoalConnectionDistance &&
+            goal_heading_error < kGoalConnectionHeadingTolerance &&
+            goal_connection_attempts++ < kMaxGoalConnectionAttempts) {
             diagnostics_.goal_connection_attempts = goal_connection_attempts;
             std::vector<Waypoint> connection;
             if (reeds_shepp_connector.connect(
-                    current.pose, request.goal, current.direction, request,
-                    collision_checker, goal_evaluator, deadline, connection)) {
+                    current.pose, request.goal, current.direction, context,
+                    deadline, connection)) {
                 std::vector<Waypoint> path = path_to(current_index);
                 path.insert(path.end(), connection.begin(), connection.end());
                 diagnostics_.planning_time_ms = std::chrono::duration<double, std::milli>(
@@ -150,16 +203,21 @@ std::vector<Waypoint> HybridAStarPlanner::plan(const PlanRequest& request) {
             }
         }
         for (int direction : {-1, 1}) for (double steer : steering) {
-            if (direction != current.direction && current.run_distance < 1.0) continue;
+            if (direction != current.direction &&
+                current.run_distance < kDirectionChangeDistance) continue;
             Node next;
-            if (!propagate(current, direction, steer, request, collision_checker, next)) continue;
+            if (!propagate(current, direction, steer, request,
+                           context.collision_checker(), next)) continue;
             const double distance = std::hypot(next.pose.x - current.pose.x,
                                                next.pose.y - current.pose.y);
             const double cost = current.cost + distance +
-                (direction != current.direction ? 4.0 : 0.0) + 0.08 * std::abs(steer);
-            const std::string state_key = key(next.pose, direction, next.velocity, next.steering);
-            auto found = best.find(state_key); if (found != best.end() && found->second <= cost) continue;
-            best[state_key] = cost;
+                (direction != current.direction ? kDirectionChangeCost : 0.0) +
+                kSteeringCostWeight * std::abs(steer);
+            const StateKey next_key =
+                state_key(next.pose, direction, next.velocity, next.steering);
+            auto found = best.find(next_key);
+            if (found != best.end() && found->second <= cost) continue;
+            best[next_key] = cost;
             next.parent = current_index;
             next.cost = cost;
             nodes.push_back(next);

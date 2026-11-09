@@ -7,8 +7,7 @@
 #include <utility>
 
 #include "parking_adas/common/math.hpp"
-#include "parking_adas/planning/collision_checker.hpp"
-#include "parking_adas/planning/parking_goal_evaluator.hpp"
+#include "parking_adas/planning/planning_context.hpp"
 
 namespace parking_adas {
 namespace {
@@ -357,14 +356,13 @@ Pose integrate_exact(Pose pose, double curvature, double signed_distance) {
 }
 
 bool sample_candidate(const ReedsSheppPath& candidate, const Pose& start,
-                     int initial_direction, const PlanRequest& request,
+                     int initial_direction, const PlanningContext& context,
                      double radius,
-                     const CollisionChecker& collision_checker,
-                     const ParkingGoalEvaluator& goal_evaluator,
                      const std::chrono::steady_clock::time_point& deadline,
                      std::vector<Waypoint>& result) {
+    const PlanRequest& request = context.request();
     result.clear();
-    if (collision_checker.is_collision(start)) return false;
+    if (context.collision_checker().is_collision(start)) return false;
 
     int first_direction = 0;
     for (const ReedsSheppSegment& segment : candidate.segments) {
@@ -414,7 +412,7 @@ bool sample_candidate(const ReedsSheppPath& candidate, const Pose& start,
             }
             const Pose previous_pose = pose;
             pose = integrate_exact(pose, curvature, step);
-            if (collision_checker.is_swept_collision(
+            if (context.collision_checker().is_swept_collision(
                     previous_pose, pose, std::abs(step),
                     std::abs(curvature * step))) {
                 return false;
@@ -433,7 +431,7 @@ bool sample_candidate(const ReedsSheppPath& candidate, const Pose& start,
             pose.yaw, 0.0, 0.0, false,
         });
     }
-    if (!goal_evaluator.is_satisfied(pose)) return false;
+    if (!context.goal_evaluator().is_satisfied(pose)) return false;
     result = std::move(sampled);
     return true;
 }
@@ -541,32 +539,29 @@ std::vector<ReedsSheppPath> ReedsSheppConnector::analytical_candidates(
 
 bool ReedsSheppConnector::connect(
     const Pose& start, const Pose& goal, int initial_direction,
-    const PlanRequest& request, const CollisionChecker& collision_checker,
-    const ParkingGoalEvaluator& goal_evaluator,
+    const PlanningContext& context,
     const std::chrono::steady_clock::time_point& deadline,
     std::vector<Waypoint>& result) const {
 #if defined(ADAS_REEDS_SHEPP_DEFAULT_ANALYTICAL) && ADAS_REEDS_SHEPP_DEFAULT_ANALYTICAL
-    return connect(start, goal, initial_direction, request, collision_checker,
-                   goal_evaluator, deadline, result,
+    return connect(start, goal, initial_direction, context, deadline, result,
                    ReedsSheppImplementation::Analytical);
 #else
-    return connect(start, goal, initial_direction, request, collision_checker,
-                   goal_evaluator, deadline, result,
+    return connect(start, goal, initial_direction, context, deadline, result,
                    ReedsSheppImplementation::Numerical);
 #endif
 }
 
 bool ReedsSheppConnector::connect(
     const Pose& start, const Pose& goal, int initial_direction,
-    const PlanRequest& request, const CollisionChecker& collision_checker,
-    const ParkingGoalEvaluator& goal_evaluator,
+    const PlanningContext& context,
     const std::chrono::steady_clock::time_point& deadline,
     std::vector<Waypoint>& result,
     ReedsSheppImplementation implementation) const {
+    const PlanRequest& request = context.request();
     result.clear();
     if (implementation == ReedsSheppImplementation::Numerical) {
-        return connect_numerical(start, goal, initial_direction, request,
-                                 collision_checker, goal_evaluator, deadline, result);
+        return connect_numerical(start, goal, initial_direction, context,
+                                 deadline, result);
     }
 
     const double steering = std::abs(request.vehicle.max_steering_angle);
@@ -584,9 +579,8 @@ bool ReedsSheppConnector::connect(
     for (const ReedsSheppPath& candidate : candidates) {
         if (std::chrono::steady_clock::now() >= deadline) break;
         std::vector<Waypoint> sampled;
-        if (sample_candidate(candidate, start, initial_direction, request,
-                             turning_radius,
-                             collision_checker, goal_evaluator, deadline, sampled)) {
+        if (sample_candidate(candidate, start, initial_direction, context,
+                             turning_radius, deadline, sampled)) {
             result = std::move(sampled);
             return true;
         }

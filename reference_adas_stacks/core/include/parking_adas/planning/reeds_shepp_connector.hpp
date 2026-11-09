@@ -8,8 +8,7 @@
 
 namespace parking_adas {
 
-class CollisionChecker;
-class ParkingGoalEvaluator;
+class PlanningContext;
 
 enum class ReedsSheppSegmentType {
     Left,
@@ -46,9 +45,7 @@ public:
         const Pose& start,
         const Pose& goal,
         int initial_direction,
-        const PlanRequest& request,
-        const CollisionChecker& collision_checker,
-        const ParkingGoalEvaluator& goal_evaluator,
+        const PlanningContext& context,
         const std::chrono::steady_clock::time_point& deadline,
         std::vector<Waypoint>& result) const;
 
@@ -56,9 +53,7 @@ public:
         const Pose& start,
         const Pose& goal,
         int initial_direction,
-        const PlanRequest& request,
-        const CollisionChecker& collision_checker,
-        const ParkingGoalEvaluator& goal_evaluator,
+        const PlanningContext& context,
         const std::chrono::steady_clock::time_point& deadline,
         std::vector<Waypoint>& result,
         ReedsSheppImplementation implementation) const;
@@ -68,9 +63,7 @@ private:
         const Pose& start,
         const Pose& goal,
         int initial_direction,
-        const PlanRequest& request,
-        const CollisionChecker& collision_checker,
-        const ParkingGoalEvaluator& goal_evaluator,
+        const PlanningContext& context,
         const std::chrono::steady_clock::time_point& deadline,
         std::vector<Waypoint>& result) const;
 };

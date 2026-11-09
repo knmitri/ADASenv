@@ -10,7 +10,10 @@ public:
     bool is_satisfied(const Pose& pose) const;
 
 private:
-    PlanRequest request_;
+    Pose goal_;
+    Footprint goal_slot_footprint_;
+    VehicleParameters vehicle_;
+    double goal_heading_tolerance_;
 };
 
 }  // namespace parking_adas

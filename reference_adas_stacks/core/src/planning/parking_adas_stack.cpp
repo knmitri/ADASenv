@@ -6,7 +6,7 @@
 #include <utility>
 
 #include "parking_adas/common/math.hpp"
-#include "parking_adas/planning/collision_checker.hpp"
+#include "parking_adas/planning/planning_context.hpp"
 
 namespace parking_adas {
 
@@ -80,8 +80,7 @@ MotionCommand ParkingAdasStack::command(const VehicleState& state) {
     // The simulator is authoritative for contact. Use its physical footprint for
     // one-step intervention; planning remains conservative through its default
     // clearance so a legal near-boundary manoeuvre is not rejected mid-execution.
-    const CollisionScene collision_scene(safety_request, 0.0);
-    const CollisionChecker collision_checker(collision_scene);
+    const PlanningContext safety_context(safety_request, 0.0);
 
     const double predicted_velocity =
         state.velocity + command.acceleration * request_.dt;
@@ -93,7 +92,7 @@ MotionCommand ParkingAdasStack::command(const VehicleState& state) {
         vehicle_.wheelbase,
         request_.dt);
 
-    if (collision_checker.is_collision(predicted)) {
+    if (safety_context.collision_checker().is_collision(predicted)) {
         command_diagnostics_.safety_override = true;
 
         safety_request.start_x = state.x;
@@ -126,7 +125,7 @@ MotionCommand ParkingAdasStack::command(const VehicleState& state) {
                     vehicle_.wheelbase,
                     request_.dt);
 
-            if (!collision_checker.is_collision(replacement_pose)) {
+            if (!safety_context.collision_checker().is_collision(replacement_pose)) {
                 return replacement_command;
             }
         }

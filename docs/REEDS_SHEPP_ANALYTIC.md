@@ -191,10 +191,11 @@ constructions for the 18 Reeds–Shepp word types used by the OMPL reference
 (some family equations have more than one construction).
 
 `analytical_candidates` is deliberately independent of obstacles and returns
-the geometric candidates. `connect` sorts those candidates by geometric
-length, enforces the requested initial direction, samples each candidate,
-and returns the first path accepted by the existing collision checker and
-goal evaluator. The numerical implementation is retained and selectable.
+the geometric candidates. `connect` receives one `PlanningContext`, sorts
+those candidates by geometric length, enforces the requested initial direction,
+samples each candidate, and returns the first path accepted by that context's
+collision checker and goal evaluator. The numerical implementation is retained
+and selectable through the same context.
 The connector clears its output vector before dispatching either implementation,
 including on failure; this makes failure output deterministic and is a change
 from the previous numerical connector's stale-output behavior.

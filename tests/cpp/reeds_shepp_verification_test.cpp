@@ -9,6 +9,7 @@
 #include "parking_adas/common/math.hpp"
 #include "parking_adas/planning/collision_checker.hpp"
 #include "parking_adas/planning/parking_goal_evaluator.hpp"
+#include "parking_adas/planning/planning_context.hpp"
 #include "parking_adas/planning/reeds_shepp_connector.hpp"
 
 namespace {
@@ -18,12 +19,6 @@ constexpr double kSampleSpacing = 0.10;
 
 void require(bool condition, const std::string& message) {
     if (!condition) throw std::runtime_error(message);
-}
-
-parking_adas::CollisionChecker make_collision_checker(
-    const parking_adas::PlanRequest& request) {
-    const parking_adas::CollisionScene scene(request);
-    return parking_adas::CollisionChecker(scene);
 }
 
 parking_adas::Pose integrate_segment(
@@ -278,10 +273,9 @@ void test_cusp_markers() {
     require(found, "no deterministic two-cusp connector fixture was found");
 
     const parking_adas::PlanRequest request = open_request(target);
-    const parking_adas::CollisionChecker checker = make_collision_checker(request);
-    const parking_adas::ParkingGoalEvaluator evaluator(request);
+    const parking_adas::PlanningContext context(request);
     std::vector<parking_adas::Waypoint> waypoints;
-    require(connector.connect({}, target, 1, request, checker, evaluator,
+    require(connector.connect({}, target, 1, context,
                 std::chrono::steady_clock::now() + std::chrono::seconds(2),
                 waypoints, parking_adas::ReedsSheppImplementation::Analytical),
             "connector did not accept the open two-cusp fixture");
@@ -367,8 +361,9 @@ void test_blocked_shortest_candidate_fallback() {
                 blocked_pose.x, blocked_pose.y, 0.0, 0.0, 0.0,
                 square(blocked_pose.x, blocked_pose.y, 0.12),
             });
-            const parking_adas::CollisionChecker checker = make_collision_checker(request);
-            const parking_adas::ParkingGoalEvaluator evaluator(request);
+            const parking_adas::PlanningContext context(request);
+            const parking_adas::CollisionChecker& checker =
+                context.collision_checker();
             if (clear_path(start, candidates.front(), radius, checker)) continue;
             const auto longer_clear = std::find_if(
                 candidates.begin() + 1, candidates.end(),
@@ -390,8 +385,8 @@ void test_blocked_shortest_candidate_fallback() {
 
             std::vector<parking_adas::Waypoint> path;
             const bool connected = connector.connect(
-                start, goal, first_direction(candidates.front()), request, checker,
-                evaluator, std::chrono::steady_clock::now() + std::chrono::seconds(3),
+                start, goal, first_direction(candidates.front()), context,
+                std::chrono::steady_clock::now() + std::chrono::seconds(3),
                 path, parking_adas::ReedsSheppImplementation::Analytical);
             if (!connected || path.empty() ||
                 polyline_length(start, path) <=
@@ -421,24 +416,22 @@ void test_deadline_and_failure_output() {
     const parking_adas::Pose start{};
     parking_adas::PlanRequest invalid = open_request({2.0, 0.0, 0.0});
     invalid.vehicle.wheelbase = 0.0;
-    const parking_adas::CollisionChecker invalid_checker = make_collision_checker(invalid);
-    const parking_adas::ParkingGoalEvaluator invalid_evaluator(invalid);
+    const parking_adas::PlanningContext invalid_context(invalid);
     std::vector<parking_adas::Waypoint> path{{9.0, 9.0, 1, 0.0, 0.0, 0.5, false}};
-    require(!connector.connect(start, invalid.goal, 1, invalid, invalid_checker,
-                invalid_evaluator, std::chrono::steady_clock::now() +
+    require(!connector.connect(start, invalid.goal, 1, invalid_context,
+                std::chrono::steady_clock::now() +
                     std::chrono::seconds(1), path,
                 parking_adas::ReedsSheppImplementation::Analytical) && path.empty(),
             "analytical failure did not clear a pre-populated output vector");
 
     parking_adas::PlanRequest request = open_request({1000000.0, 0.0, 0.0});
-    const parking_adas::CollisionChecker checker = make_collision_checker(request);
-    const parking_adas::ParkingGoalEvaluator evaluator(request);
+    const parking_adas::PlanningContext context(request);
     path = {{9.0, 9.0, 1, 0.0, 0.0, 0.5, false}};
     const auto deadline = std::chrono::steady_clock::now() +
         std::chrono::milliseconds(50);
     const auto sampling_start = std::chrono::steady_clock::now();
-    const bool connected = connector.connect(start, request.goal, 1, request,
-        checker, evaluator, deadline, path,
+    const bool connected = connector.connect(start, request.goal, 1, context,
+        deadline, path,
         parking_adas::ReedsSheppImplementation::Analytical);
     const auto sampling_elapsed = std::chrono::steady_clock::now() - sampling_start;
     require(!connected && path.empty(),
@@ -451,9 +444,10 @@ void test_deadline_and_failure_output() {
               << " ms with empty output\n";
 
     request.goal = {2.0, 0.0, 0.0};
+    const parking_adas::PlanningContext expired_context(request);
     path = {{9.0, 9.0, 1, 0.0, 0.0, 0.5, false}};
     const auto expired_start = std::chrono::steady_clock::now();
-    require(!connector.connect(start, request.goal, 1, request, checker, evaluator,
+    require(!connector.connect(start, request.goal, 1, expired_context,
                 std::chrono::steady_clock::time_point::min(), path,
                 parking_adas::ReedsSheppImplementation::Analytical) && path.empty(),
             "already-expired deadline returned success or stale output");
@@ -464,8 +458,7 @@ void test_deadline_and_failure_output() {
               << " us (candidate enumeration itself has no cancellation check)\n";
 
     path = {{9.0, 9.0, 1, 0.0, 0.0, 0.5, false}};
-    require(!connector.connect(start, {2.0, 0.0, 0.0}, 1, invalid,
-                invalid_checker, invalid_evaluator,
+    require(!connector.connect(start, {2.0, 0.0, 0.0}, 1, invalid_context,
                 std::chrono::steady_clock::time_point::min(), path,
                 parking_adas::ReedsSheppImplementation::Numerical) && path.empty(),
             "numerical fallback failure did not clear the output vector");
@@ -476,13 +469,12 @@ void test_default_dispatch() {
     const parking_adas::Pose start{};
     const parking_adas::Pose goal{2.0, 0.0, 0.0};
     const parking_adas::PlanRequest request = open_request(goal);
-    const parking_adas::CollisionChecker checker = make_collision_checker(request);
-    const parking_adas::ParkingGoalEvaluator evaluator(request);
+    const parking_adas::PlanningContext context(request);
     const auto deadline = std::chrono::steady_clock::now() +
         std::chrono::seconds(2);
     std::vector<parking_adas::Waypoint> default_path;
     std::vector<parking_adas::Waypoint> explicit_path;
-    require(connector.connect(start, goal, 1, request, checker, evaluator,
+    require(connector.connect(start, goal, 1, context,
                 deadline, default_path),
             "default connector dispatch failed");
 #if defined(ADAS_REEDS_SHEPP_DEFAULT_ANALYTICAL) && ADAS_REEDS_SHEPP_DEFAULT_ANALYTICAL
@@ -490,7 +482,7 @@ void test_default_dispatch() {
 #else
     constexpr auto expected = parking_adas::ReedsSheppImplementation::Numerical;
 #endif
-    require(connector.connect(start, goal, 1, request, checker, evaluator,
+    require(connector.connect(start, goal, 1, context,
                 deadline, explicit_path, expected),
             "explicit default-mode connector call failed");
     require(default_path.size() == explicit_path.size() &&

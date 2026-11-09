@@ -3,28 +3,26 @@
 #include <chrono>
 #include <cmath>
 
-#include "parking_adas/planning/collision_checker.hpp"
-#include "parking_adas/planning/parking_goal_evaluator.hpp"
+#include "parking_adas/common/math.hpp"
+#include "parking_adas/planning/planning_context.hpp"
 #include "parking_adas/planning/reeds_shepp_connector.hpp"
 
 namespace parking_adas {
 
-std::vector<Waypoint> ReedsSheppLocalPlanner::plan(const PlanRequest& request) {
+std::vector<Waypoint> ReedsSheppLocalPlanner::plan(const PlanRequest& input_request) {
+    const PlanningContext context(input_request);
+    const PlanRequest& request = context.request();
     const auto started = std::chrono::steady_clock::now();
     diagnostics_ = {};
     diagnostics_.closest_goal_distance = std::hypot(
         request.goal.x - request.start_x, request.goal.y - request.start_y);
 
-    const CollisionScene collision_scene(request);
-    const CollisionChecker collision_checker(collision_scene);
-    const ParkingGoalEvaluator goal_evaluator(request);
     const ReedsSheppConnector connector;
     std::vector<Waypoint> connection;
     const auto deadline = started + std::chrono::milliseconds(3000);
     const bool connected = connector.connect(
         {request.start_x, request.start_y, request.start_heading}, request.goal,
-        request.start_direction, request, collision_checker, goal_evaluator,
-        deadline, connection);
+        request.start_direction, context, deadline, connection);
 
     diagnostics_.goal_connection_attempts = 1;
     diagnostics_.planning_time_ms = std::chrono::duration<double, std::milli>(
@@ -38,7 +36,8 @@ std::vector<Waypoint> ReedsSheppLocalPlanner::plan(const PlanRequest& request) {
         request.start_y,
         request.start_direction,
         request.start_heading,
-        std::tan(request.start_steering) / request.vehicle.wheelbase,
+        curvature_from_steering_angle(
+            request.start_steering, request.vehicle.wheelbase),
         request.start_velocity,
         false,
     });

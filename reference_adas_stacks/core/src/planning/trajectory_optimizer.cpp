@@ -3,12 +3,14 @@
 #include <algorithm>
 #include <cmath>
 
+#include "parking_adas/common/math.hpp"
+
 namespace parking_adas {
 
 std::vector<Waypoint> KinematicTrajectoryOptimizer::optimize(
     std::vector<Waypoint> trajectory, const PlanRequest& request) const {
-    const double maximum_curvature = std::tan(request.vehicle.max_steering_angle) /
-        request.vehicle.wheelbase;
+    const double maximum_curvature = curvature_from_steering_angle(
+        request.vehicle.max_steering_angle, request.vehicle.wheelbase);
     for (Waypoint& point : trajectory) {
         point.curvature = std::max(-maximum_curvature,
                                    std::min(maximum_curvature, point.curvature));

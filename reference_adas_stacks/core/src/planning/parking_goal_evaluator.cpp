@@ -7,16 +7,20 @@
 
 namespace parking_adas {
 
-ParkingGoalEvaluator::ParkingGoalEvaluator(const PlanRequest& request) : request_(request) {}
+ParkingGoalEvaluator::ParkingGoalEvaluator(const PlanRequest& request)
+    : goal_(request.goal),
+      goal_slot_footprint_(request.goal_slot_footprint),
+      vehicle_(request.vehicle),
+      goal_heading_tolerance_(request.goal_heading_tolerance) {}
 
 bool ParkingGoalEvaluator::is_satisfied(const Pose& pose) const {
-    if (request_.goal_slot_footprint.size() != 4 ||
-        std::abs(normalize_angle(pose.yaw - request_.goal.yaw)) > request_.goal_heading_tolerance) {
+    if (goal_slot_footprint_.size() != 4 ||
+        std::abs(normalize_angle(pose.yaw - goal_.yaw)) > goal_heading_tolerance_) {
         return false;
     }
     return polygon_contains_polygon(
-        footprint_polygon(request_.goal_slot_footprint),
-        vehicle_footprint(pose, request_.vehicle)
+        footprint_polygon(goal_slot_footprint_),
+        vehicle_footprint(pose, vehicle_)
     );
 }
 

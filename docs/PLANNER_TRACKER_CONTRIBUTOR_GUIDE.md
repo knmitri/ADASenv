@@ -23,11 +23,13 @@ and the simulator visualizes it.
 ## Add A Path Planner
 
 1. Add the planner implementation under `reference_adas_stacks/include/` and
-   derive from the shared `PathPlanner` interface in `core/include/`.
-2. Implement `plan(const PlanRequest&)`. Build one immutable `CollisionScene`
-   for that request and use its `CollisionChecker` for collision queries. Use
-   the rear-axle vehicle reference and `ParkingGoalEvaluator` for terminal
-   acceptance.
+   derive from the shared `PathPlanner` interface in
+   `motion_api/include/parking_adas/planning/path_planner.hpp`.
+2. Implement `plan(const PlanRequest&)`. Construct one `PlanningContext` for
+   the request and use its collision checker and goal evaluator. The context
+   owns the consistent request snapshot and immutable `CollisionScene`.
+   Connectors that need all three receive the context rather than independently
+   assembled request, checker, and goal evaluator objects.
 3. Override `should_replan(const TrackingStatus&, const PlanRequest&)` only if
    your planner needs a strategy-specific recovery policy.
 4. Register a stable ID in `reference_adas_stacks/core/src/planning/path_planner.cpp`.

@@ -17,6 +17,7 @@
 #include "parking_adas/planning/collision_checker.hpp"
 #include "parking_adas/hybrid_astar/hybrid_a_star.hpp"
 #include "parking_adas/planning/parking_goal_evaluator.hpp"
+#include "parking_adas/planning/planning_context.hpp"
 #include "parking_adas/planning/reeds_shepp_connector.hpp"
 #include "parking_adas/reeds_shepp_local/reeds_shepp_local_planner.hpp"
 #include "parking_adas/stack/parking_adas_stack.hpp"
@@ -305,6 +306,26 @@ void test_collision_scene_snapshot_and_reuse() {
             "invalid scene world bounds did not fail closed");
 }
 
+void test_planning_context_snapshot() {
+    static_assert(!std::is_copy_constructible<parking_adas::PlanningContext>::value,
+                  "planning contexts must not be copied independently");
+
+    parking_adas::PlanRequest request = base_request();
+    request.static_obstacles.push_back({0.0, 0.0, 0.0, 1.0, 1.0, {}});
+    const parking_adas::PlanningContext context(request, 0.0);
+    request.goal = {10.0, 10.0, 0.0};
+    request.static_obstacles.clear();
+
+    require(context.request().goal.x == 2.0 && context.request().goal.y == 0.0,
+            "planning context did not retain its request snapshot");
+    require(context.collision_checker().is_collision({0.0, 0.0, 0.0}),
+            "planning context collision scene changed with its source request");
+    require(context.goal_evaluator().is_satisfied({2.0, 0.0, 0.0}),
+            "planning context goal evaluator disagrees with its request snapshot");
+    require(!context.goal_evaluator().is_satisfied({10.0, 10.0, 0.0}),
+            "planning context goal evaluator used a subsequently changed request");
+}
+
 void test_swept_collision_checker() {
     parking_adas::PlanRequest request = base_request();
     request.world_min_x = -20.0;
@@ -585,8 +606,7 @@ void test_hybrid_a_star() {
 
 void test_reeds_shepp_connector() {
     parking_adas::PlanRequest request = base_request();
-    parking_adas::CollisionChecker collision_checker = make_collision_checker(request);
-    parking_adas::ParkingGoalEvaluator goal_evaluator(request);
+    const parking_adas::PlanningContext context(request);
     parking_adas::ReedsSheppConnector connector;
     std::vector<parking_adas::Waypoint> path;
 
@@ -594,14 +614,12 @@ void test_reeds_shepp_connector() {
                 {request.start_x, request.start_y, request.start_heading},
                 request.goal,
                 1,
-                request,
-                collision_checker,
-                goal_evaluator,
+                context,
                 std::chrono::steady_clock::now() + std::chrono::seconds(1),
                 path),
             "Reeds-Shepp connector did not find an open forward connection");
     require(!path.empty(), "Reeds-Shepp connector returned an empty path");
-    require(goal_evaluator.is_satisfied(
+    require(context.goal_evaluator().is_satisfied(
                 {path.back().x, path.back().y, path.back().heading}),
             "Reeds-Shepp connector did not reach the goal pose");
 
@@ -610,47 +628,41 @@ void test_reeds_shepp_connector() {
         {-6.0, -1.5}, {2.0, -1.5}, {2.0, 1.5}, {-6.0, 1.5},
     }};
     request.world_min_x = -8.0;
-    parking_adas::CollisionChecker reverse_collision_checker =
-        make_collision_checker(request);
-    parking_adas::ParkingGoalEvaluator reverse_goal_evaluator(request);
+    const parking_adas::PlanningContext reverse_context(request);
     path.clear();
     require(connector.connect(
                 {request.start_x, request.start_y, request.start_heading},
                 request.goal,
                 -1,
-                request,
-                reverse_collision_checker,
-                reverse_goal_evaluator,
+                reverse_context,
                 std::chrono::steady_clock::now() + std::chrono::seconds(1),
                 path),
             "Reeds-Shepp connector did not find an open reverse connection");
     require(path.front().direction < 0,
             "Reeds-Shepp connector lost the requested reverse direction");
-    require(reverse_goal_evaluator.is_satisfied(
+    require(reverse_context.goal_evaluator().is_satisfied(
                 {path.back().x, path.back().y, path.back().heading}),
             "reverse Reeds-Shepp connection did not reach the goal pose");
 }
 
 void test_analytical_reeds_shepp_collision_connection() {
     const parking_adas::PlanRequest request = base_request();
-    const parking_adas::CollisionChecker collision_checker =
-        make_collision_checker(request);
-    const parking_adas::ParkingGoalEvaluator goal_evaluator(request);
+    const parking_adas::PlanningContext context(request);
     const parking_adas::ReedsSheppConnector connector;
     std::vector<parking_adas::Waypoint> path;
     const bool connected = connector.connect(
         {request.start_x, request.start_y, request.start_heading},
-        request.goal, request.start_direction, request, collision_checker,
-        goal_evaluator, std::chrono::steady_clock::now() +
+        request.goal, request.start_direction, context,
+        std::chrono::steady_clock::now() +
             std::chrono::seconds(1), path,
         parking_adas::ReedsSheppImplementation::Analytical);
     require(connected && !path.empty(),
             "analytical connector failed to select a collision-free candidate");
-    require(goal_evaluator.is_satisfied(
+    require(context.goal_evaluator().is_satisfied(
                 {path.back().x, path.back().y, path.back().heading}),
             "analytical connector returned a path outside the parking goal");
     for (const parking_adas::Waypoint& point : path) {
-        require(!collision_checker.is_collision(
+        require(!context.collision_checker().is_collision(
                     {point.x, point.y, point.heading}),
                 "analytical connector returned a colliding sampled waypoint");
     }
@@ -658,8 +670,8 @@ void test_analytical_reeds_shepp_collision_connection() {
     std::vector<parking_adas::Waypoint> numerical_path;
     require(connector.connect(
                 {request.start_x, request.start_y, request.start_heading},
-                request.goal, request.start_direction, request, collision_checker,
-                goal_evaluator, std::chrono::steady_clock::now() +
+                        request.goal, request.start_direction, context,
+                        std::chrono::steady_clock::now() +
                     std::chrono::seconds(1), numerical_path,
                 parking_adas::ReedsSheppImplementation::Numerical) &&
                 !numerical_path.empty(),
@@ -726,13 +738,10 @@ void test_analytical_reeds_shepp_candidates() {
     zero_request.goal_slot_footprint = {
         {-2.0, -1.5}, {8.0, -1.5}, {8.0, 1.5}, {-2.0, 1.5},
     };
-    const parking_adas::CollisionChecker zero_collision_checker =
-        make_collision_checker(zero_request);
-    const parking_adas::ParkingGoalEvaluator zero_goal_evaluator(zero_request);
+    const parking_adas::PlanningContext zero_context(zero_request);
     std::vector<parking_adas::Waypoint> zero_path;
     require(connector.connect(
-                start, start, 1, zero_request, zero_collision_checker,
-                zero_goal_evaluator, std::chrono::steady_clock::now() +
+                start, start, 1, zero_context, std::chrono::steady_clock::now() +
                     std::chrono::seconds(1), zero_path,
                 parking_adas::ReedsSheppImplementation::Analytical) &&
                 zero_path.size() == 1,
@@ -1114,6 +1123,7 @@ int main() {
     try {
         test_collision_checker();
         test_collision_scene_snapshot_and_reuse();
+        test_planning_context_snapshot();
         test_swept_collision_checker();
         test_collision_check_performance();
         test_hybrid_a_star();
