@@ -19,6 +19,8 @@ import time
 import uuid
 from typing import Any, Iterable
 
+import numpy as np
+
 from simulator import experiment_runner
 from simulator.adas_stack_catalog import PROJECT_ROOT
 from simulator.benchmark_metrics import aggregate_trials
@@ -342,6 +344,12 @@ def _trial_status(result: dict[str, Any]) -> str:
     return "failure"
 
 
+def _optional_bool(value: Any) -> bool | None:
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
+    return None
+
+
 def execute_trial(
     *,
     planner_id: str,
@@ -386,6 +394,9 @@ def execute_trial(
                 )
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.write_text(output.getvalue(), encoding="utf-8")
+    for field in ("success", "collision_occurred", "stuck", "timed_out"):
+        result[field] = _optional_bool(result.get(field))
+    success = result["success"]
     result.update({
         "benchmark_mode": "accelerated-closed-loop",
         "planning_latency_source": "closed_loop_initial",
@@ -393,7 +404,7 @@ def execute_trial(
             "initial_planning_latency_ms"
         ),
         "planner_only_latency_ms": None,
-        "parking_success": result.get("success", False),
+        "parking_success": success,
         "valid_plan": None,
         "wall_clock_execution_seconds": time.perf_counter() - wall_started,
         "planner_id": planner_id,
@@ -410,10 +421,10 @@ def execute_trial(
         else "failure" if failure_reason
         else _trial_status(result)
     )
-    result.setdefault("success", False)
-    result.setdefault("collision_occurred", None)
-    result.setdefault("stuck", None)
-    result.setdefault("timed_out", result["trial_status"] == "timeout")
+    if result["trial_status"] == "timeout":
+        result["timed_out"] = True
+    elif result["timed_out"] is None and not failure_reason:
+        result["timed_out"] = False
     result["episode_wall_clock_seconds"] = result.get(
         "episode_wall_clock_seconds", result.get("episode_duration_seconds")
     )
@@ -431,9 +442,15 @@ def execute_trial(
         if result["simulated_duration_seconds"] is not None
         and isinstance(episode_wall, (int, float)) and episode_wall > 0 else None
     )
-    final_path_metrics = result.get("final_commanded_path_metrics", {})
-    result["final_path_valid"] = final_path_metrics.get("path_valid")
-    result["final_path_collision"] = final_path_metrics.get("path_collision")
+    final_path_metrics = result.get("final_commanded_path_metrics")
+    if not isinstance(final_path_metrics, dict):
+        final_path_metrics = {}
+    result["final_path_valid"] = _optional_bool(
+        final_path_metrics.get("path_valid", result.get("final_path_valid"))
+    )
+    result["final_path_collision"] = _optional_bool(
+        final_path_metrics.get("path_collision", result.get("final_path_collision"))
+    )
     result["simulation_steps"] = result.get("steps")
     return result
 

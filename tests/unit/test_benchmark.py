@@ -16,6 +16,7 @@ from simulator.benchmark import (
     _executable_metadata,
     _release_executable,
     _release_executable_name,
+    _optional_bool,
     _cmake_behavior_metadata,
     _report_aggregate_rows,
     _compiler_metadata,
@@ -425,6 +426,102 @@ def test_failed_trial_is_recorded_and_report_is_written(tmp_path: Path):
     assert "Median episode wall (s)" in text
     assert "Speed factor" in text
     assert json.loads(json.dumps(trial))["trial_status"] == "timeout"
+
+
+@pytest.mark.parametrize(
+    (
+        "runner_behavior",
+        "result_payload",
+        "expected_status",
+        "expected_success",
+        "expected_timed_out",
+    ),
+    [
+        ("timeout", None, "timeout", None, True),
+        ("crash", None, "failure", None, None),
+        ("complete", {"collision_occurred": None}, "failure", None, False),
+        ("complete", {"success": False}, "failure", False, False),
+        ("complete", {"success": True}, "success", True, False),
+        ("complete", {"success": "false"}, "failure", None, False),
+    ],
+)
+def test_closed_loop_trial_preserves_unknown_and_explicit_outcomes(
+    tmp_path: Path,
+    runner_behavior: str,
+    result_payload: dict | None,
+    expected_status: str,
+    expected_success: bool | None,
+    expected_timed_out: bool | None,
+):
+    result_path = tmp_path / "trial.json"
+
+    def runner(_args):
+        if runner_behavior == "timeout":
+            raise TimeoutError("simulator timed out")
+        if runner_behavior == "crash":
+            raise RuntimeError("simulator crashed")
+        result_path.write_text(json.dumps(result_payload), encoding="utf-8")
+        return 0
+
+    trial = execute_trial(
+        planner_id="hybrid_astar",
+        scenario_id="scene",
+        artifact=tmp_path / "scene.json",
+        trial_index=1,
+        is_warmup=False,
+        catalog_path=tmp_path / "catalog.json",
+        trial_path=result_path,
+        log_path=tmp_path / "trial.log",
+        max_steps=10,
+        accept_timeout=1.0,
+        socket_timeout=1.0,
+        runner=runner,
+    )
+
+    assert trial["trial_status"] == expected_status
+    assert trial["success"] is expected_success
+    assert trial["parking_success"] is expected_success
+    assert trial["timed_out"] is expected_timed_out
+    assert trial["collision_occurred"] is None
+    assert trial["stuck"] is None
+    assert trial["final_path_valid"] is None
+    assert trial["final_path_collision"] is None
+
+
+def test_optional_boolean_accepts_numpy_booleans_and_rejects_other_values():
+    assert _optional_bool(np.bool_(True)) is True
+    assert _optional_bool(np.bool_(False)) is False
+    assert _optional_bool("false") is None
+    assert _optional_bool(None) is None
+
+
+def test_aggregation_excludes_unknown_success_but_counts_confirmed_timeout():
+    row = aggregate_trials([
+        {
+            "planner_id": "hybrid_astar",
+            "scenario_id": "scene",
+            "benchmark_mode": "accelerated-closed-loop",
+            "success": None,
+            "parking_success": None,
+            "timed_out": True,
+        },
+        {
+            "planner_id": "hybrid_astar",
+            "scenario_id": "scene",
+            "benchmark_mode": "accelerated-closed-loop",
+            "success": False,
+            "parking_success": False,
+            "timed_out": False,
+        },
+    ])[0]
+
+    assert row["trial_count"] == 2
+    assert row["success_observation_count"] == 1
+    assert row["success_count"] == 0
+    assert row["parking_success_rate"] == 0.0
+    assert row["timeout_observation_count"] == 2
+    assert row["timeout_count"] == 1
+    assert row["timeout_rate"] == 0.5
 
 
 def test_non_finite_result_metrics_are_serialized_as_missing():
