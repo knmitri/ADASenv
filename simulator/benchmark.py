@@ -32,7 +32,9 @@ PLANNERS = ("hybrid_astar", "reeds_shepp_local")
 TRACKER_ID = "pure_pursuit"
 TRIAL_FIELDS = (
     "planner_id", "scenario_id", "scenario_artifact", "trial_index", "is_warmup",
-    "trial_status", "success", "collision_occurred", "stuck", "timed_out",
+    "trial_status", "parking_success", "valid_plan", "collision_occurred", "path_collision",
+    "stuck", "timed_out",
+    "planning_diagnostics_valid",
     "failure_reason", "initial_plan_valid", "path_valid", "path_collision",
     "final_path_valid", "final_path_collision",
     "benchmark_mode", "planning_latency_source",
@@ -111,6 +113,63 @@ def _compiler_metadata(build_dir: Path) -> dict[str, str | None]:
     }
 
 
+def _cmake_build_options(build_dir: Path) -> dict[str, str | None]:
+    cache_path = build_dir / "CMakeCache.txt"
+    if not cache_path.exists():
+        return {}
+    relevant = {
+        "CMAKE_BUILD_TYPE",
+        "CMAKE_CONFIGURATION_TYPES",
+        "CMAKE_GENERATOR",
+        "CMAKE_CXX_FLAGS",
+        "CMAKE_CXX_FLAGS_RELEASE",
+        "ADAS_REEDS_SHEPP_DEFAULT_ANALYTICAL",
+        "ADAS_ENABLE_OMPL_REFERENCE_TESTS",
+    }
+    options: dict[str, str | None] = {}
+    for line in cache_path.read_text(encoding="utf-8", errors="replace").splitlines():
+        if line and not line.startswith(("//", "#")) and "=" in line:
+            key, value = line.split("=", 1)
+            key = key.split(":", 1)[0]
+            if key in relevant:
+                options[key] = value
+    for key in relevant:
+        options.setdefault(key, None)
+    return dict(sorted(options.items()))
+
+
+def _executable_metadata(executable: Path) -> dict[str, Any]:
+    metadata: dict[str, Any] = {
+        "sha256": None,
+        "size_bytes": None,
+        "modified_utc": None,
+        "available": executable.is_file(),
+    }
+    if not executable.is_file():
+        return metadata
+    digest = hashlib.sha256()
+    with executable.open("rb") as file:
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    stat = executable.stat()
+    metadata.update({
+        "sha256": digest.hexdigest(),
+        "size_bytes": stat.st_size,
+        "modified_utc": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+    })
+    return metadata
+
+
+def _cmake_behavior_metadata(build_dir: Path) -> dict[str, Any]:
+    return {
+        "build_options": _cmake_build_options(build_dir),
+        "binary_commit_correspondence": (
+            "not verified; executable hash, Git commit and worktree state are "
+            "recorded independently"
+        ),
+    }
+
+
 def _release_executable(build_dir: Path) -> Path:
     cache_path = build_dir / "CMakeCache.txt"
     if not cache_path.exists():
@@ -128,7 +187,7 @@ def _release_executable(build_dir: Path) -> Path:
             f"configurations={configurations!r})"
         )
 
-    executable_name = "tcp_json_sim_bridge.exe" if os.name == "nt" else "tcp_json_sim_bridge"
+    executable_name = _release_executable_name(os.name)
     candidates = (
         build_dir / "Release" / executable_name,
         build_dir / executable_name,
@@ -139,6 +198,45 @@ def _release_executable(build_dir: Path) -> Path:
     raise FileNotFoundError(
         f"Release bridge executable not found. Checked: {', '.join(map(str, candidates))}"
     )
+
+
+def _release_executable_name(platform_name: str) -> str:
+    return "tcp_json_sim_bridge.exe" if platform_name == "nt" else "tcp_json_sim_bridge"
+
+
+def _validate_planner_response(response: Any) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    if not isinstance(response, dict) or response.get("type") != "ready":
+        raise ValueError(f"Expected ready response from planner-only process: {response}")
+    path = response.get("planned_path")
+    if not isinstance(path, list):
+        raise ValueError("planner response planned_path must be an array")
+    diagnostics = response.get("planning_diagnostics")
+    if not isinstance(diagnostics, dict):
+        raise ValueError("planner response planning_diagnostics must be an object")
+    required_types = {
+        "expanded_nodes": int,
+        "goal_connection_attempts": int,
+        "closest_goal_distance_m": (int, float),
+        "planning_time_ms": (int, float),
+        "time_limited": bool,
+        "solution_found": bool,
+        "partial_plan": bool,
+    }
+    for name, expected_type in required_types.items():
+        value = diagnostics.get(name)
+        if isinstance(value, bool) and expected_type != bool:
+            raise ValueError(f"planning_diagnostics.{name} has an invalid type")
+        if not isinstance(value, expected_type):
+            raise ValueError(f"planning_diagnostics.{name} has an invalid or missing value")
+        if isinstance(value, (int, float)) and not math.isfinite(float(value)):
+            raise ValueError(f"planning_diagnostics.{name} must be finite")
+    if diagnostics["planning_time_ms"] < 0:
+        raise ValueError("planning_diagnostics.planning_time_ms must be non-negative")
+    if diagnostics["expanded_nodes"] < 0 or diagnostics["goal_connection_attempts"] < 0:
+        raise ValueError("planning diagnostic counts must be non-negative")
+    if diagnostics["closest_goal_distance_m"] < 0:
+        raise ValueError("planning_diagnostics.closest_goal_distance_m must be non-negative")
+    return path, diagnostics
 
 
 def _new_output_directory(root: Path) -> Path:
@@ -295,6 +393,8 @@ def execute_trial(
             "initial_planning_latency_ms"
         ),
         "planner_only_latency_ms": None,
+        "parking_success": result.get("success", False),
+        "valid_plan": None,
         "wall_clock_execution_seconds": time.perf_counter() - wall_started,
         "planner_id": planner_id,
         "scenario_id": scenario_id,
@@ -400,25 +500,29 @@ def execute_planner_only_trial(
                 f"planner process returned {completed.returncode}: {completed.stderr.strip()}"
             )
         response = json.loads(completed.stdout)
-        if response.get("type") != "ready":
-            raise RuntimeError(f"Expected ready response from planner-only process: {response}")
-        points = response.get("planned_path", [])
+        points, diagnostics = _validate_planner_response(response)
         path_metrics = experiment_runner.measure_path(points, sim)
-        diagnostics = response.get("planning_diagnostics", {})
-        solution_found = bool(diagnostics.get("solution_found", False))
-        path_valid = bool(path_metrics["path_valid"])
-        success = solution_found and path_valid
+        if points and path_metrics["path_length_m"] is None:
+            raise ValueError("planner response contains malformed or non-finite path points")
+        valid_plan = bool(
+            diagnostics["solution_found"]
+            and path_metrics["path_valid"]
+            and path_metrics["path_length_m"] is not None
+        )
         timed_out = bool(diagnostics.get("time_limited", False))
         result = {
             **path_metrics,
             "planning_diagnostics": diagnostics,
+            "planning_diagnostics_valid": True,
             "initial_planning_latency_ms": diagnostics.get("planning_time_ms"),
             "planner_only_latency_ms": diagnostics.get("planning_time_ms"),
             "closed_loop_initial_planning_latency_ms": None,
             "planning_latency_source": "planner_only",
-            "initial_plan_valid": success,
-            "success": success,
-            "collision_occurred": path_metrics.get("path_collision"),
+            "initial_plan_valid": valid_plan,
+            "valid_plan": valid_plan,
+            "parking_success": None,
+            "success": None,
+            "collision_occurred": None,
             "stuck": False,
             "timed_out": timed_out,
             "simulation_steps": None,
@@ -430,7 +534,9 @@ def execute_planner_only_trial(
             "wall_clock_execution_seconds": time.perf_counter() - started,
             "planner_only_process_wall_seconds": process_wall_seconds,
             "runner_return_code": completed.returncode,
-            "trial_status": "timeout" if timed_out else "success" if success else "failure",
+            "trial_status": (
+                "timeout" if timed_out else "valid_plan" if valid_plan else "invalid_plan"
+            ),
             "failure_reason": None,
         }
     except Exception as exc:
@@ -438,6 +544,7 @@ def execute_planner_only_trial(
         timed_out = isinstance(exc, subprocess.TimeoutExpired)
         result = {
             "initial_planning_latency_ms": None,
+            "planning_diagnostics_valid": False,
             "planner_only_latency_ms": None,
             "closed_loop_initial_planning_latency_ms": None,
             "planning_latency_source": "planner_only",
@@ -447,7 +554,9 @@ def execute_planner_only_trial(
             "path_valid": False,
             "path_collision": None,
             "initial_plan_valid": False,
-            "success": False,
+            "valid_plan": False,
+            "parking_success": None,
+            "success": None,
             "collision_occurred": None,
             "stuck": False,
             "timed_out": timed_out,
@@ -460,7 +569,7 @@ def execute_planner_only_trial(
             "wall_clock_execution_seconds": time.perf_counter() - started,
             "planner_only_process_wall_seconds": process_wall_seconds,
             "runner_return_code": None,
-            "trial_status": "timeout" if timed_out else "failure",
+            "trial_status": "timeout" if timed_out else "invalid_plan",
             "failure_reason": failure_reason,
         }
     finally:
@@ -492,12 +601,133 @@ def _write_csv(path: Path, rows: list[dict[str, Any]], fields: Iterable[str]) ->
         writer.writerows(rows)
 
 
+def _report_aggregate_rows(
+    rows: list[dict[str, Any]], mode: str
+) -> list[dict[str, Any]]:
+    planner_only = mode == "planner-only"
+    planner_only_only = {
+        "success_count",
+        "collision_count",
+        "collision_rate",
+        "stuck_count",
+        "stuck_rate",
+        "timeout_count",
+        "timeout_rate",
+        "closed_loop_initial_planning_latency_count",
+        "closed_loop_initial_planning_latency_median_ms",
+        "episode_steps_median",
+        "final_position_error_median",
+        "final_heading_error_deg_median",
+        "episode_duration_median_seconds",
+        "wall_clock_execution_median_seconds",
+        "simulated_duration_median_seconds",
+        "simulation_speed_factor_median",
+    }
+    closed_loop_only = {
+        "valid_plan_count",
+        "valid_plan_rate",
+        "planning_success_rate",
+        "path_collision_rate",
+        "planner_only_latency_count",
+        "planner_only_latency_median_ms",
+        "path_waypoint_count_median",
+        "path_direction_changes_median",
+    }
+    mapped: list[dict[str, Any]] = []
+    for row in rows:
+        result = dict(row)
+        result.pop("success_rate", None)
+        result.pop("parking_success_rate", None)
+        result.pop("valid_plan_rate", None)
+        result.pop("planning_success_rate", None)
+        if planner_only:
+            for key in planner_only_only:
+                result.pop(key, None)
+            result["valid_plan_rate"] = row["valid_plan_rate"]
+            result["path_collision_count"] = row["collision_count"]
+            result["path_collision_rate"] = row["path_collision_rate"]
+            result["planner_timeout_count"] = row["timeout_count"]
+            result["planner_timeout_rate"] = row["timeout_rate"]
+            result["planning_failure_count"] = row["failure_count"]
+            result["planning_failure_rate"] = row["failure_rate"]
+            result.pop("failure_count", None)
+            result.pop("failure_rate", None)
+        else:
+            for key in closed_loop_only:
+                result.pop(key, None)
+            result["parking_success_rate"] = row["parking_success_rate"]
+        mapped.append(result)
+    return mapped
+
+
 def generate_report(
     output_dir: Path,
     metadata: dict[str, Any],
     scenario_aggregates: list[dict[str, Any]],
     planner_aggregates: list[dict[str, Any]],
 ) -> Path:
+    planner_only = metadata["mode"] == "planner-only"
+    outcome_columns = (
+        ("Valid plan rate", "Path collision rate", "Planning failure rate")
+        if planner_only
+        else ("Parking success rate", "Collision rate", "Stuck rate", "Timeout rate", "Failure rate")
+    )
+    planner_headings = (
+        outcome_columns + (
+            f"Median {metadata['latency_label']} (ms)", "P95 plan (ms)", "Max plan (ms)",
+            "Mean +/- SD (ms)", "Median path (m)", "Waypoints", "Direction changes",
+            "Path valid rate",
+        )
+        if planner_only
+        else outcome_columns + (
+            f"Median {metadata['latency_label']} (ms)", "P95 plan (ms)", "Max plan (ms)",
+            "Mean +/- SD (ms)", "Median path (m)", "Median simulated (s)",
+            "Median episode wall (s)", "Speed factor", "Median steps",
+            "Position error (m)", "Heading error (deg)",
+        )
+    )
+    scenario_headings = ("Scenario", "Planner", "Trials") + planner_headings
+    table_header = "| " + " | ".join(("Planner", "Trials") + planner_headings) + " |"
+    table_divider = "|" + "|".join("---:" for _ in range(2 + len(planner_headings))) + "|"
+    if planner_only:
+        outcome_values = lambda row: (
+            f"{_fmt(row['valid_plan_rate'] * 100 if row['valid_plan_rate'] is not None else None)}%",
+            f"{_fmt(row['path_collision_rate'] * 100 if row['path_collision_rate'] is not None else None)}%",
+            f"{_fmt(row['planning_failure_rate'] * 100 if row['planning_failure_rate'] is not None else None)}%",
+        )
+    else:
+        outcome_values = lambda row: (
+            f"{_fmt(row['parking_success_rate'] * 100 if row['parking_success_rate'] is not None else None)}%",
+            f"{_fmt(row['collision_rate'] * 100)}%",
+            f"{_fmt(row['stuck_rate'] * 100)}%",
+            f"{_fmt(row['timeout_rate'] * 100)}%",
+            f"{_fmt(row['failure_rate'] * 100)}%",
+        )
+
+    def metric_values(row: dict[str, Any]) -> tuple[str, ...]:
+        common = (
+            _fmt(row["planning_latency_median_ms"]),
+            _fmt(row["planning_latency_p95_ms"]),
+            _fmt(row["planning_latency_max_ms"]),
+            f"{_fmt(row['planning_latency_mean_ms'])} +/- "
+            f"{_fmt(row['planning_latency_stddev_ms'])}",
+            _fmt(row["path_length_median"]),
+        )
+        if planner_only:
+            return common + (
+                _fmt(row["path_waypoint_count_median"]),
+                _fmt(row["path_direction_changes_median"]),
+                f"{_fmt(row['path_valid_rate'] * 100 if row['path_valid_rate'] is not None else None)}%",
+            )
+        return common + (
+            _fmt(row["simulated_duration_median_seconds"]),
+            _fmt(row["episode_duration_median_seconds"]),
+            _fmt(row["simulation_speed_factor_median"]),
+            _fmt(row["episode_steps_median"]),
+            _fmt(row["final_position_error_median"]),
+            _fmt(row["final_heading_error_deg_median"]),
+        )
+
     lines = [
         "# ADAS Parking Benchmark",
         "",
@@ -513,47 +743,25 @@ def generate_report(
         "",
         "## Planner aggregates",
         "",
-        f"| Planner | Trials | Success | Collision | Stuck | Timeout | Failure | Median {metadata['latency_label']} (ms) | P95 plan (ms) | Max plan (ms) | Mean +/- SD (ms) | Median path (m) | Median simulated (s) | Median episode wall (s) | Speed factor | Median steps | Position error (m) | Heading error (deg) |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        table_header,
+        table_divider,
     ]
     for row in planner_aggregates:
-        mean = row["planning_latency_mean_ms"]
-        stddev = row["planning_latency_stddev_ms"]
         lines.append(
-            f"| {row['planner_id']} | {row['trial_count']} | "
-            f"{row['success_rate']:.1%} | {row['collision_rate']:.1%} | "
-            f"{row['stuck_rate']:.1%} | {row['timeout_rate']:.1%} | "
-            f"{row['failure_rate']:.1%} | {_fmt(row['planning_latency_median_ms'])} | "
-            f"{_fmt(row['planning_latency_p95_ms'])} | "
-            f"{_fmt(row['planning_latency_max_ms'])} | {_fmt(mean)} +/- {_fmt(stddev)} | "
-            f"{_fmt(row['path_length_median'])} | "
-            f"{_fmt(row['simulated_duration_median_seconds'])} | "
-            f"{_fmt(row['episode_duration_median_seconds'])} | "
-            f"{_fmt(row['simulation_speed_factor_median'])} | "
-            f"{_fmt(row['episode_steps_median'])} | "
-            f"{_fmt(row['final_position_error_median'])} | "
-            f"{_fmt(row['final_heading_error_deg_median'])} |"
+            "| " + " | ".join(
+                (row["planner_id"], str(row["trial_count"]))
+                + outcome_values(row) + metric_values(row)
+            ) + " |"
         )
-    lines.extend(["", "## Scenario results", "",
-                  f"| Scenario | Planner | Trials | Success | Collision | Stuck | Timeout | Failure | Median {metadata['latency_label']} (ms) | P95 plan (ms) | Max plan (ms) | Mean +/- SD (ms) | Median path (m) | Median simulated (s) | Median episode wall (s) | Speed factor | Median steps | Position error (m) | Heading error (deg) |",
-                  "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"])
+    scenario_header = "| " + " | ".join(scenario_headings) + " |"
+    scenario_divider = "|" + "|".join("---:" for _ in scenario_headings) + "|"
+    lines.extend(["", "## Scenario results", "", scenario_header, scenario_divider])
     for row in scenario_aggregates:
         lines.append(
-            f"| {row['scenario_id']} | {row['planner_id']} | {row['trial_count']} | "
-            f"{row['success_rate']:.1%} | {row['collision_rate']:.1%} | "
-            f"{row['stuck_rate']:.1%} | {row['timeout_rate']:.1%} | "
-            f"{row['failure_rate']:.1%} | {_fmt(row['planning_latency_median_ms'])} | "
-            f"{_fmt(row['planning_latency_p95_ms'])} | "
-            f"{_fmt(row['planning_latency_max_ms'])} | "
-            f"{_fmt(row['planning_latency_mean_ms'])} +/- "
-            f"{_fmt(row['planning_latency_stddev_ms'])} | "
-            f"{_fmt(row['path_length_median'])} | "
-            f"{_fmt(row['simulated_duration_median_seconds'])} | "
-            f"{_fmt(row['episode_duration_median_seconds'])} | "
-            f"{_fmt(row['simulation_speed_factor_median'])} | "
-            f"{_fmt(row['episode_steps_median'])} | "
-            f"{_fmt(row['final_position_error_median'])} | "
-            f"{_fmt(row['final_heading_error_deg_median'])} |"
+            "| " + " | ".join(
+                (row["scenario_id"], row["planner_id"], str(row["trial_count"]))
+                + outcome_values(row) + metric_values(row)
+            ) + " |"
         )
     lines.extend([
         "",
@@ -563,11 +771,19 @@ def generate_report(
         f"- Planning latency is specific to `{metadata['mode']}`. Planner-only latency is the C++ planner diagnostic and excludes process startup; its process wall time includes launching the one-shot process. Closed-loop initial planning latency is the diagnostic from the initial ready response.",
         "- Simulated episode duration is `simulation_steps * dt`; episode wall duration is measured separately from reset through termination. The speed factor is simulated duration divided by episode wall duration. Full closed-loop trial wall time additionally includes bridge startup, connection/handshake, and shutdown.",
         "- Geometric path length is the sum of Euclidean distances between consecutive coordinates from the initial plan. It is not inferred from waypoint count.",
-        "- Path validity checks each reported waypoint using the simulator's vehicle footprint, static obstacle, boundary, goal-slot, and heading rules. It is discrete waypoint validation, not continuous swept-path certification.",
+        (
+            "- Planner-only path validity is waypoint-level validation using the simulator's vehicle footprint, static obstacle, boundary, goal-slot, and heading rules; it is not a continuous swept-path certification."
+            if planner_only
+            else "- Closed-loop initial-plan and final-commanded-path validity check reported waypoints using the simulator's vehicle footprint, static obstacle, boundary, goal-slot, and heading rules. This is discrete waypoint validation, not continuous swept-path certification."
+        ),
         "- Simulation step time is measured only around the Python `sim.step()` call. It does not include TCP and command handling.",
         "- Failure trials are retained. Missing measurements remain blank and are not imputed; each aggregate reports the number of available planning-latency/path-length samples.",
         "- The built-in scenario artifacts are deterministic and disable random spawning. Planner order alternates by scenario and trial; warm-ups are recorded but excluded from aggregates.",
-        "- Planner-only mode directly invokes the selected planner using the same serialized reset/PlanRequest fields as closed-loop mode. It bypasses TCP, tracking, and vehicle simulation, so episode duration and speed factor are not applicable; path validity is waypoint-level geometric validation.",
+        (
+            "- Planner-only mode directly invokes the selected planner using the same serialized reset/PlanRequest fields as closed-loop mode. It bypasses TCP, tracking, and vehicle simulation, so episode duration and speed factor are not applicable."
+            if planner_only
+            else "- Accelerated closed-loop mode executes the full simulator and ADAS stack without rendering; parking success and collision rates therefore describe the maneuver, not merely plan validity."
+        ),
         "- Windows/Linux timing is hardware- and load-dependent. Compare runs on the same host/build when drawing performance conclusions.",
         "",
     ])
@@ -632,6 +848,8 @@ def run_benchmark(args: argparse.Namespace) -> Path:
         "build_configuration": "Release",
         "build_directory": str(args.build_dir.resolve()),
         "executable": str(executable),
+        "executable_metadata": _executable_metadata(executable),
+        "cmake": _cmake_behavior_metadata(args.build_dir.resolve()),
         "operating_system": platform.platform(),
         "architecture": platform.machine(),
         "python_version": platform.python_version(),
@@ -731,10 +949,12 @@ def run_benchmark(args: argparse.Namespace) -> Path:
         )
 
     measured = [trial for trial in trials if not trial["is_warmup"]]
-    scenario_aggregates = aggregate_trials(measured)
-    planner_aggregates = aggregate_trials(
-        [{**trial, "scenario_id": "all"} for trial in measured]
+    scenario_aggregates = _report_aggregate_rows(
+        aggregate_trials(measured), args.mode
     )
+    planner_aggregates = _report_aggregate_rows(aggregate_trials(
+        [{**trial, "scenario_id": "all"} for trial in measured]
+    ), args.mode)
     _write_json(output_dir / "raw_trials.json", trials)
     _write_csv(output_dir / "individual_trials.csv", measured, TRIAL_FIELDS)
     aggregate_fields = list(scenario_aggregates[0]) if scenario_aggregates else []

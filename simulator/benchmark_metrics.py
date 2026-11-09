@@ -122,8 +122,16 @@ def aggregate_trials(trials: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     aggregates: list[dict[str, Any]] = []
     for (planner_id, scenario_id), group in sorted(groups.items()):
         count = len(group)
+        planner_only = all(trial.get("benchmark_mode") == "planner-only" for trial in group)
+        valid_plans = sum(bool(trial.get("valid_plan", False)) for trial in group)
         successful = sum(bool(trial.get("success", False)) for trial in group)
-        collisions = sum(bool(trial.get("collision_occurred", False)) for trial in group)
+        collisions = sum(
+            bool(
+                trial.get("path_collision")
+                if planner_only else trial.get("collision_occurred", False)
+            )
+            for trial in group
+        )
         stuck = sum(bool(trial.get("stuck", False)) for trial in group)
         timeouts = sum(bool(trial.get("timed_out", False)) for trial in group)
         failures = sum(not bool(trial.get("success", False)) for trial in group)
@@ -132,6 +140,9 @@ def aggregate_trials(trials: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
         steps = _numeric_values(group, "simulation_steps")
         position_errors = _numeric_values(group, "final_position_error_m")
         heading_errors = _numeric_values(group, "final_heading_error_deg")
+        path_waypoints = _numeric_values(group, "path_waypoint_count")
+        path_direction_changes = _numeric_values(group, "path_direction_changes")
+        valid_paths = sum(bool(trial.get("path_valid", False)) for trial in group)
         planner_only_latency = _numeric_values(group, "planner_only_latency_ms")
         closed_loop_latency = _numeric_values(
             group, "closed_loop_initial_planning_latency_ms"
@@ -141,15 +152,25 @@ def aggregate_trials(trials: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
             "scenario_id": scenario_id,
             "trial_count": count,
             "success_count": successful,
-            "success_rate": successful / count if count else None,
+            "success_rate": None if planner_only else (successful / count if count else None),
+            "parking_success_rate": (
+                None if planner_only else (successful / count if count else None)
+            ),
+            "valid_plan_count": valid_plans,
+            "valid_plan_rate": valid_plans / count if planner_only and count else None,
+            "planning_success_rate": valid_plans / count if planner_only and count else None,
             "collision_count": collisions,
             "collision_rate": collisions / count if count else None,
+            "path_collision_rate": collisions / count if planner_only and count else None,
             "stuck_count": stuck,
             "stuck_rate": stuck / count if count else None,
             "timeout_count": timeouts,
             "timeout_rate": timeouts / count if count else None,
-            "failure_count": failures,
-            "failure_rate": failures / count if count else None,
+            "failure_count": count - valid_plans if planner_only else failures,
+            "failure_rate": (
+                (count - valid_plans) / count if planner_only and count
+                else (failures / count if count else None)
+            ),
             "planning_latency_count": len(latency),
             "planning_latency_median_ms": median(latency) if latency else None,
             "planning_latency_p95_ms": _percentile(latency, 95),
@@ -166,6 +187,13 @@ def aggregate_trials(trials: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
             ),
             "path_length_count": len(path_lengths),
             "path_length_median": median(path_lengths) if path_lengths else None,
+            "path_waypoint_count_median": (
+                median(path_waypoints) if path_waypoints else None
+            ),
+            "path_direction_changes_median": (
+                median(path_direction_changes) if path_direction_changes else None
+            ),
+            "path_valid_rate": valid_paths / count if count else None,
             "episode_steps_median": median(steps) if steps else None,
             "final_position_error_median": median(position_errors) if position_errors else None,
             "final_heading_error_deg_median": median(heading_errors) if heading_errors else None,

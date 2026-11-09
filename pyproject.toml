@@ -38,6 +38,10 @@ include = ["simulator*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+addopts = "-m 'not integration'"
+markers = [
+  "integration: requires a built Release simulator bridge executable"
+]
 
 [tool.ruff]
 line-length = 100

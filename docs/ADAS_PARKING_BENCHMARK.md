@@ -8,12 +8,24 @@ planner settings.
 
 ## Build and run
 
-Build the simulator bridge in Release mode:
+Build the simulator bridge in Release mode. For Linux with a
+single-configuration generator:
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --target tcp_json_sim_bridge -j
+```
+
+For Windows with Visual Studio (multi-configuration):
 
 ```powershell
 cmake -S . -B build
-cmake --build build --config Release
+cmake --build build --config Release --target tcp_json_sim_bridge
 ```
+
+`_release_executable()` checks the `Release` subdirectory for multi-config
+generators and the build root for single-config builds; it rejects a
+single-configuration build whose `CMAKE_BUILD_TYPE` is not `Release`.
 
 Run the seven-artifact benchmark suite with five measured runs per
 planner/scenario and one warm-up per planner/scenario:
@@ -73,7 +85,11 @@ Each run contains:
 
 - `metadata.json`: commit, OS/architecture, compiler, Python, build, scenario
   hashes/IDs, tracker, vehicle/simulation settings, timeouts, repetitions, and
-  the comparison-input fingerprint.
+  the comparison-input fingerprint; SHA-256, size and modification time for
+  the actual bridge executable; and relevant CMake behavior/build options.
+  The executable hash, Git commit and worktree state are reported separately:
+  the benchmark cannot establish that an existing build was produced from the
+  current source revision.
 - `trials\*.json` and `raw_trials.json`: full individual trial results,
   including warm-ups and captured failure reasons.
 - `individual_trials.csv`: measured trials only.
@@ -118,3 +134,23 @@ order alternates across trials to reduce ordering bias. Both planners receive
 the same artifact contents and vehicle/simulation settings; closed-loop runs
 also use the same configured tracker. Closed-loop planning latency reports the
 initial plan only and does not expose per-replan latency.
+
+## Optional C++ planner integration tests
+
+The regular Python suite excludes tests marked `integration`. After building
+the Release bridge as above, run the direct planner checks with:
+
+```powershell
+python -m pytest -m integration tests\integration\test_planner_only.py
+```
+
+```bash
+python -m pytest -m integration tests/integration/test_planner_only.py
+```
+
+The tests invoke both planner IDs with the deterministic `parallel_end_slot`
+request, validate the response schema and planning diagnostics, parse the path,
+and validate it against simulator geometry. They skip with a reason if the
+expected Release executable is unavailable and fail explicitly if the planner
+process exceeds the timeout. The standard unit command remains
+`python -m pytest -q`.
