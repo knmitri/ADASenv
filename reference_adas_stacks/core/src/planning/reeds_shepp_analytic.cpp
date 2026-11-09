@@ -355,14 +355,17 @@ Pose integrate_exact(Pose pose, double curvature, double signed_distance) {
     return pose;
 }
 
-bool sample_candidate(const ReedsSheppPath& candidate, const Pose& start,
+ReedsSheppRejectionReason sample_candidate(
+                     const ReedsSheppPath& candidate, const Pose& start,
                      int initial_direction, const PlanningContext& context,
                      double radius,
                      const std::chrono::steady_clock::time_point& deadline,
                      std::vector<Waypoint>& result) {
     const PlanRequest& request = context.request();
     result.clear();
-    if (context.collision_checker().is_collision(start)) return false;
+    if (context.collision_checker().is_collision(start)) {
+        return ReedsSheppRejectionReason::InitialPoseCollision;
+    }
 
     int first_direction = 0;
     for (const ReedsSheppSegment& segment : candidate.segments) {
@@ -373,7 +376,7 @@ bool sample_candidate(const ReedsSheppPath& candidate, const Pose& start,
     }
     if (first_direction != 0 && initial_direction != 0 &&
         first_direction != initial_direction) {
-        return false;
+        return ReedsSheppRejectionReason::InitialDirectionMismatch;
     }
 
     Pose pose = start;
@@ -385,7 +388,9 @@ bool sample_candidate(const ReedsSheppPath& candidate, const Pose& start,
                  request.vehicle.rear_overhang) + kMaximumConnectorClearance,
         request.vehicle.width / 2.0 + kMaximumConnectorClearance);
     for (const ReedsSheppSegment& segment : candidate.segments) {
-        if (std::chrono::steady_clock::now() >= deadline) return false;
+        if (std::chrono::steady_clock::now() >= deadline) {
+            return ReedsSheppRejectionReason::DeadlineExpired;
+        }
         if (std::abs(segment.signed_length) <= 1e-10) continue;
 
         const int direction = segment.signed_length > 0.0 ? 1 : -1;
@@ -402,20 +407,20 @@ bool sample_candidate(const ReedsSheppPath& candidate, const Pose& start,
             kSweptPointMotionBound);
         if (!std::isfinite(requested_samples) ||
             requested_samples > static_cast<double>(std::numeric_limits<int>::max())) {
-            return false;
+            return ReedsSheppRejectionReason::InvalidCandidate;
         }
         const int sample_count = std::max(1, static_cast<int>(requested_samples));
         const double step = segment.signed_length / sample_count;
         for (int index = 0; index < sample_count; ++index) {
             if (std::chrono::steady_clock::now() >= deadline) {
-                return false;
+                return ReedsSheppRejectionReason::DeadlineExpired;
             }
             const Pose previous_pose = pose;
             pose = integrate_exact(pose, curvature, step);
             if (context.collision_checker().is_swept_collision(
                     previous_pose, pose, std::abs(step),
                     std::abs(curvature * step))) {
-                return false;
+                return ReedsSheppRejectionReason::SweptCollision;
             }
             sampled.push_back({
                 pose.x, pose.y, direction, pose.yaw, curvature,
@@ -431,9 +436,11 @@ bool sample_candidate(const ReedsSheppPath& candidate, const Pose& start,
             pose.yaw, 0.0, 0.0, false,
         });
     }
-    if (!context.goal_evaluator().is_satisfied(pose)) return false;
+    if (!context.goal_evaluator().is_satisfied(pose)) {
+        return ReedsSheppRejectionReason::GoalEvaluatorRejection;
+    }
     result = std::move(sampled);
-    return true;
+    return ReedsSheppRejectionReason::Accepted;
 }
 
 }  // namespace
@@ -541,51 +548,121 @@ bool ReedsSheppConnector::connect(
     const Pose& start, const Pose& goal, int initial_direction,
     const PlanningContext& context,
     const std::chrono::steady_clock::time_point& deadline,
-    std::vector<Waypoint>& result) const {
+    std::vector<Waypoint>& result,
+    ReedsSheppConnectorDiagnostics* diagnostics) const {
 #if defined(ADAS_REEDS_SHEPP_DEFAULT_ANALYTICAL) && ADAS_REEDS_SHEPP_DEFAULT_ANALYTICAL
     return connect(start, goal, initial_direction, context, deadline, result,
-                   ReedsSheppImplementation::Analytical);
+                   ReedsSheppImplementation::Analytical, diagnostics);
 #else
     return connect(start, goal, initial_direction, context, deadline, result,
-                   ReedsSheppImplementation::Numerical);
+                   ReedsSheppImplementation::Numerical, diagnostics);
 #endif
 }
 
-bool ReedsSheppConnector::connect(
+namespace {
+
+bool connect_analytical(
+    const ReedsSheppConnector& connector,
     const Pose& start, const Pose& goal, int initial_direction,
     const PlanningContext& context,
     const std::chrono::steady_clock::time_point& deadline,
     std::vector<Waypoint>& result,
-    ReedsSheppImplementation implementation) const {
+    ReedsSheppConnectorDiagnostics& diagnostics) {
     const PlanRequest& request = context.request();
-    result.clear();
-    if (implementation == ReedsSheppImplementation::Numerical) {
-        return connect_numerical(start, goal, initial_direction, context,
-                                 deadline, result);
-    }
+    AnalyticalConnectorCounters& counters = diagnostics.analytical;
 
     const double steering = std::abs(request.vehicle.max_steering_angle);
     const double wheelbase = request.vehicle.wheelbase;
     if (!std::isfinite(steering) || !std::isfinite(wheelbase) ||
         steering <= 1e-12 || steering >= 0.5 * kAnalyticPi ||
         wheelbase <= 1e-12) {
+        diagnostics.invalid_configuration = true;
         return false;
     }
     const double turning_radius = wheelbase / std::tan(steering);
-    if (!std::isfinite(turning_radius) || turning_radius <= 0.0) return false;
+    if (!std::isfinite(turning_radius) || turning_radius <= 0.0) {
+        diagnostics.invalid_configuration = true;
+        return false;
+    }
 
     const std::vector<ReedsSheppPath> candidates =
-        analytical_candidates(start, goal, turning_radius);
+        connector.analytical_candidates(start, goal, turning_radius);
+    counters.geometric_candidates_generated = static_cast<int>(candidates.size());
     for (const ReedsSheppPath& candidate : candidates) {
-        if (std::chrono::steady_clock::now() >= deadline) break;
+        if (std::chrono::steady_clock::now() >= deadline) {
+            ++counters.candidates_examined;
+            ++counters.deadline_rejections;
+            break;
+        }
+        ++counters.candidates_examined;
         std::vector<Waypoint> sampled;
-        if (sample_candidate(candidate, start, initial_direction, context,
-                             turning_radius, deadline, sampled)) {
-            result = std::move(sampled);
-            return true;
+        const ReedsSheppRejectionReason reason = sample_candidate(
+            candidate, start, initial_direction, context, turning_radius,
+            deadline, sampled);
+        switch (reason) {
+            case ReedsSheppRejectionReason::Accepted:
+                ++counters.accepted_candidates;
+                result = std::move(sampled);
+                diagnostics.selected_path_length_m = candidate.geometric_length;
+                diagnostics.selected_segment_count = static_cast<int>(std::count_if(
+                    candidate.segments.begin(), candidate.segments.end(),
+                    [](const ReedsSheppSegment& segment) {
+                        return std::abs(segment.signed_length) > 1e-10;
+                    }));
+                diagnostics.selected_waypoint_count = static_cast<int>(result.size());
+                diagnostics.selected_path_family = candidate.family;
+                return true;
+            case ReedsSheppRejectionReason::InitialPoseCollision:
+                ++counters.initial_pose_collision_rejections;
+                break;
+            case ReedsSheppRejectionReason::InitialDirectionMismatch:
+                ++counters.initial_direction_rejections;
+                break;
+            case ReedsSheppRejectionReason::SweptCollision:
+                ++counters.swept_collision_rejections;
+                break;
+            case ReedsSheppRejectionReason::GoalEvaluatorRejection:
+                ++counters.goal_rejections;
+                break;
+            case ReedsSheppRejectionReason::DeadlineExpired:
+                ++counters.deadline_rejections;
+                break;
+            case ReedsSheppRejectionReason::PoseCollision:
+            case ReedsSheppRejectionReason::InvalidCandidate:
+                ++counters.invalid_candidate_rejections;
+                break;
         }
     }
     return false;
+}
+
+}  // namespace
+
+bool ReedsSheppConnector::connect(
+    const Pose& start, const Pose& goal, int initial_direction,
+    const PlanningContext& context,
+    const std::chrono::steady_clock::time_point& deadline,
+    std::vector<Waypoint>& result,
+    ReedsSheppImplementation implementation,
+    ReedsSheppConnectorDiagnostics* out_diagnostics) const {
+    const auto call_started = std::chrono::steady_clock::now();
+    ReedsSheppConnectorDiagnostics diagnostics;
+    diagnostics.implementation = implementation;
+    diagnostics.connector_attempts = 1;
+    result.clear();
+
+    const bool connected = implementation == ReedsSheppImplementation::Numerical
+        ? connect_numerical(start, goal, initial_direction, context, deadline,
+                            result, diagnostics)
+        : connect_analytical(*this, start, goal, initial_direction, context,
+                             deadline, result, diagnostics);
+
+    diagnostics.solution_accepted = connected;
+    diagnostics.accepted_connector_attempts = connected ? 1 : 0;
+    diagnostics.planning_time_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - call_started).count();
+    if (out_diagnostics != nullptr) *out_diagnostics = std::move(diagnostics);
+    return connected;
 }
 
 }  // namespace parking_adas

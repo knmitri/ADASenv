@@ -191,9 +191,9 @@ std::vector<std::vector<double>> seeds(std::size_t segment_count, double distanc
     return result;
 }
 
-bool sample_candidate(const Candidate& candidate, const Pose& start,
-                      const PlanningContext& context,
-                      std::vector<Waypoint>& result) {
+ReedsSheppRejectionReason sample_candidate(const Candidate& candidate, const Pose& start,
+                                          const PlanningContext& context,
+                                          std::vector<Waypoint>& result) {
     const PlanRequest& request = context.request();
     Pose pose = start;
     const double max_curvature = curvature_from_steering_angle(
@@ -206,7 +206,9 @@ bool sample_candidate(const Candidate& candidate, const Pose& start,
         for (int index = 0; index < samples; ++index) {
             pose = integrate_segment(
                 pose, segment.curvature_sign * max_curvature, segment.direction * step);
-            if (context.collision_checker().is_collision(pose)) return false;
+            if (context.collision_checker().is_collision(pose)) {
+                return ReedsSheppRejectionReason::PoseCollision;
+            }
             sampled.push_back({
                 pose.x, pose.y, segment.direction, pose.yaw,
                 segment.curvature_sign * max_curvature,
@@ -215,12 +217,72 @@ bool sample_candidate(const Candidate& candidate, const Pose& start,
             });
         }
     }
-    if (sampled.empty() || !context.goal_evaluator().is_satisfied(pose)) return false;
+    if (sampled.empty()) return ReedsSheppRejectionReason::InvalidCandidate;
+    if (!context.goal_evaluator().is_satisfied(pose)) {
+        return ReedsSheppRejectionReason::GoalEvaluatorRejection;
+    }
     result = std::move(sampled);
-    return true;
+    return ReedsSheppRejectionReason::Accepted;
 }
 
 }  // namespace
+
+const char* to_string(ReedsSheppRejectionReason reason) {
+    switch (reason) {
+        case ReedsSheppRejectionReason::Accepted: return "accepted";
+        case ReedsSheppRejectionReason::InitialPoseCollision: return "initial_pose_collision";
+        case ReedsSheppRejectionReason::InitialDirectionMismatch: return "initial_direction_mismatch";
+        case ReedsSheppRejectionReason::PoseCollision: return "pose_collision";
+        case ReedsSheppRejectionReason::SweptCollision: return "swept_collision";
+        case ReedsSheppRejectionReason::GoalEvaluatorRejection: return "goal_evaluator_rejection";
+        case ReedsSheppRejectionReason::DeadlineExpired: return "deadline_expired";
+        case ReedsSheppRejectionReason::InvalidCandidate: return "invalid_candidate";
+    }
+    return "unknown";
+}
+
+void accumulate_connector_diagnostics(
+    ReedsSheppConnectorDiagnostics& total,
+    const ReedsSheppConnectorDiagnostics& call) {
+    if (call.connector_attempts == 0) return;
+    total.implementation = call.implementation;
+    total.connector_attempts += call.connector_attempts;
+    total.accepted_connector_attempts += call.accepted_connector_attempts;
+    total.planning_time_ms += call.planning_time_ms;
+    total.invalid_configuration = total.invalid_configuration || call.invalid_configuration;
+    if (call.solution_accepted) {
+        total.solution_accepted = true;
+        total.selected_path_length_m = call.selected_path_length_m;
+        total.selected_segment_count = call.selected_segment_count;
+        total.selected_waypoint_count = call.selected_waypoint_count;
+        total.selected_path_family = call.selected_path_family;
+    }
+    NumericalConnectorCounters& n = total.numerical;
+    const NumericalConnectorCounters& cn = call.numerical;
+    n.combinations_attempted += cn.combinations_attempted;
+    n.solver_failures += cn.solver_failures;
+    n.solver_converged += cn.solver_converged;
+    n.initial_direction_rejections += cn.initial_direction_rejections;
+    n.cost_pruned_candidates += cn.cost_pruned_candidates;
+    n.candidates_sampled += cn.candidates_sampled;
+    n.pose_collision_rejections += cn.pose_collision_rejections;
+    n.goal_rejections += cn.goal_rejections;
+    n.invalid_candidate_rejections += cn.invalid_candidate_rejections;
+    n.deadline_rejections += cn.deadline_rejections;
+    n.accepted_candidates += cn.accepted_candidates;
+    n.initial_pose_collision_observations += cn.initial_pose_collision_observations;
+    AnalyticalConnectorCounters& a = total.analytical;
+    const AnalyticalConnectorCounters& ca = call.analytical;
+    a.geometric_candidates_generated += ca.geometric_candidates_generated;
+    a.candidates_examined += ca.candidates_examined;
+    a.initial_pose_collision_rejections += ca.initial_pose_collision_rejections;
+    a.initial_direction_rejections += ca.initial_direction_rejections;
+    a.swept_collision_rejections += ca.swept_collision_rejections;
+    a.goal_rejections += ca.goal_rejections;
+    a.invalid_candidate_rejections += ca.invalid_candidate_rejections;
+    a.deadline_rejections += ca.deadline_rejections;
+    a.accepted_candidates += ca.accepted_candidates;
+}
 
 bool ReedsSheppConnector::connect_numerical(
     const Pose& start,
@@ -228,22 +290,43 @@ bool ReedsSheppConnector::connect_numerical(
     int initial_direction,
     const PlanningContext& context,
     const std::chrono::steady_clock::time_point& deadline,
-    std::vector<Waypoint>& result) const {
+    std::vector<Waypoint>& result,
+    ReedsSheppConnectorDiagnostics& diagnostics) const {
+    NumericalConnectorCounters& counters = diagnostics.numerical;
     const PlanRequest& request = context.request();
     const double max_curvature = curvature_from_steering_angle(
         request.vehicle.max_steering_angle, request.vehicle.wheelbase);
-    if (max_curvature <= 1e-9) return false;
+    if (max_curvature <= 1e-9) {
+        diagnostics.invalid_configuration = true;
+        return false;
+    }
 
     Candidate best;
+    // Observation only: the numerical search never validates the start pose, so
+    // this probe is reported but must not influence candidate acceptance.
+    if (context.collision_checker().is_collision(start)) {
+        ++counters.initial_pose_collision_observations;
+    }
+    bool deadline_expired = false;
     const double distance = std::hypot(goal.x - start.x, goal.y - start.y);
     for (const std::vector<double>& word : canonical_words()) {
-        if (std::chrono::steady_clock::now() >= deadline) break;
+        if (std::chrono::steady_clock::now() >= deadline) {
+            deadline_expired = true;
+            break;
+        }
         const std::size_t count = word.size();
         const unsigned direction_variants = 1U << count;
+        const int seeds_per_variant = static_cast<int>(seeds(count, distance).size());
         for (unsigned mask = 0; mask < direction_variants; ++mask) {
-            if (std::chrono::steady_clock::now() >= deadline) break;
+            if (std::chrono::steady_clock::now() >= deadline) {
+                deadline_expired = true;
+                break;
+            }
             const int first_direction = (mask & 1U) == 0U ? 1 : -1;
-            if (first_direction != initial_direction) continue;
+            if (first_direction != initial_direction) {
+                counters.initial_direction_rejections += seeds_per_variant;
+                continue;
+            }
             for (const std::vector<double>& seed : seeds(count, distance)) {
                 std::vector<Segment> segments;
                 segments.reserve(count);
@@ -253,7 +336,12 @@ bool ReedsSheppConnector::connect_numerical(
                         seed[index],
                     });
                 }
-                if (!solve_pattern(segments, start, goal, max_curvature)) continue;
+                ++counters.combinations_attempted;
+                if (!solve_pattern(segments, start, goal, max_curvature)) {
+                    ++counters.solver_failures;
+                    continue;
+                }
+                ++counters.solver_converged;
 
                 double cost = 0.0;
                 for (std::size_t index = 0; index < count; ++index) {
@@ -263,15 +351,44 @@ bool ReedsSheppConnector::connect_numerical(
                     }
                 }
                 Candidate candidate{std::move(segments), cost};
+                if (!(candidate.cost < best.cost)) {
+                    ++counters.cost_pruned_candidates;
+                    continue;
+                }
                 std::vector<Waypoint> sampled;
-                if (candidate.cost < best.cost &&
-                    sample_candidate(candidate, start, context, sampled)) {
-                    best = std::move(candidate);
-                    result = std::move(sampled);
+                ++counters.candidates_sampled;
+                const ReedsSheppRejectionReason reason =
+                    sample_candidate(candidate, start, context, sampled);
+                switch (reason) {
+                    case ReedsSheppRejectionReason::Accepted:
+                        ++counters.accepted_candidates;
+                        best = std::move(candidate);
+                        result = std::move(sampled);
+                        diagnostics.selected_path_length_m = 0.0;
+                        diagnostics.selected_segment_count = 0;
+                        for (const Segment& segment : best.segments) {
+                            if (segment.length < 1e-4) continue;
+                            diagnostics.selected_path_length_m += segment.length;
+                            ++diagnostics.selected_segment_count;
+                        }
+                        diagnostics.selected_waypoint_count =
+                            static_cast<int>(result.size());
+                        break;
+                    case ReedsSheppRejectionReason::PoseCollision:
+                        ++counters.pose_collision_rejections;
+                        break;
+                    case ReedsSheppRejectionReason::GoalEvaluatorRejection:
+                        ++counters.goal_rejections;
+                        break;
+                    default:
+                        ++counters.invalid_candidate_rejections;
+                        break;
                 }
             }
         }
+        if (deadline_expired) break;
     }
+    if (deadline_expired) ++counters.deadline_rejections;
     return std::isfinite(best.cost);
 }
 

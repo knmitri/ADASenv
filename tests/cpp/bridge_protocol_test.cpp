@@ -143,6 +143,48 @@ void test_escaped_strings_and_serialized_messages() {
             "ack response was not valid JSON");
 }
 
+void test_connector_diagnostics_serialization() {
+    parking_adas::PlanningDiagnostics diagnostics;
+    const sim_bridge::Json idle = sim_bridge::Json::parse(
+        sim_bridge::ready_response({}, diagnostics)).at("planning_diagnostics");
+    require(idle.at("reeds_shepp_connector").at("implementation") == "none" &&
+                idle.at("reeds_shepp_connector").at("connector_attempts") == 0 &&
+                !idle.at("reeds_shepp_connector").contains("numerical") &&
+                !idle.at("reeds_shepp_connector").contains("analytical"),
+            "unused connector diagnostics were not reported as none");
+
+    parking_adas::ReedsSheppConnectorDiagnostics& connector = diagnostics.reeds_shepp_connector;
+    connector.connector_attempts = 2;
+    connector.implementation = parking_adas::ReedsSheppImplementation::Analytical;
+    connector.analytical.geometric_candidates_generated = 12;
+    connector.analytical.candidates_examined = 5;
+    connector.analytical.swept_collision_rejections = 4;
+    connector.analytical.accepted_candidates = 1;
+    const sim_bridge::Json analytical = sim_bridge::Json::parse(
+        sim_bridge::ready_response({}, diagnostics)).at("planning_diagnostics")
+            .at("reeds_shepp_connector");
+    require(analytical.at("implementation") == "analytical" &&
+                analytical.at("analytical").at("swept_collision_rejections") == 4 &&
+                analytical.at("analytical").at("geometric_candidates_generated") == 12 &&
+                !analytical.contains("numerical"),
+            "analytical connector counters were not serialized");
+
+    connector.implementation = parking_adas::ReedsSheppImplementation::Numerical;
+    connector.numerical.combinations_attempted = 7;
+    connector.numerical.pose_collision_rejections = 3;
+    connector.numerical.initial_pose_collision_observations = 2;
+    const sim_bridge::Json numerical = sim_bridge::Json::parse(
+        sim_bridge::ready_response({}, diagnostics)).at("planning_diagnostics")
+            .at("reeds_shepp_connector");
+    require(numerical.at("implementation") == "numerical" &&
+                numerical.at("numerical").at("combinations_attempted") == 7 &&
+                numerical.at("numerical").at("pose_collision_rejections") == 3 &&
+                numerical.at("numerical").at("initial_pose_collision_observations") == 2 &&
+                !numerical.at("numerical").contains("initial_pose_collision_rejections") &&
+                !numerical.contains("analytical"),
+            "numerical connector counters were not serialized");
+}
+
 void test_legacy_optional_fields_keep_defaults() {
     const parking_adas::PlanRequest request = sim_bridge::parse_reset_request(
         R"({"type":"reset","start":[0,0],"start_heading":0,"goal_pose":[3,4,0]})"
@@ -158,6 +200,7 @@ int main() {
         test_nested_reset_and_state_parsing();
         test_schema_errors();
         test_escaped_strings_and_serialized_messages();
+        test_connector_diagnostics_serialization();
         test_legacy_optional_fields_keep_defaults();
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

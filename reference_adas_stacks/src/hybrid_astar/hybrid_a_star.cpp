@@ -193,9 +193,13 @@ std::vector<Waypoint> HybridAStarPlanner::plan(const PlanRequest& input_request)
             goal_connection_attempts++ < kMaxGoalConnectionAttempts) {
             diagnostics_.goal_connection_attempts = goal_connection_attempts;
             std::vector<Waypoint> connection;
-            if (reeds_shepp_connector.connect(
-                    current.pose, request.goal, current.direction, context,
-                    deadline, connection)) {
+            ReedsSheppConnectorDiagnostics connection_diagnostics;
+            const bool connected = reeds_shepp_connector.connect(
+                current.pose, request.goal, current.direction, context,
+                deadline, connection, &connection_diagnostics);
+            accumulate_connector_diagnostics(
+                diagnostics_.reeds_shepp_connector, connection_diagnostics);
+            if (connected) {
                 std::vector<Waypoint> path = path_to(current_index);
                 path.insert(path.end(), connection.begin(), connection.end());
                 diagnostics_.planning_time_ms = std::chrono::duration<double, std::milli>(

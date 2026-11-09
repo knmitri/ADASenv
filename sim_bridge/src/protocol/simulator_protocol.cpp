@@ -27,6 +27,59 @@ Json path_array(const std::vector<parking_adas::Waypoint>& path) {
     return result;
 }
 
+Json connector_diagnostics_json(
+    const parking_adas::ReedsSheppConnectorDiagnostics& diagnostics
+) {
+    using parking_adas::ReedsSheppImplementation;
+    const bool invoked = diagnostics.connector_attempts > 0;
+    Json result = {
+        {"implementation", !invoked ? "none"
+            : diagnostics.implementation == ReedsSheppImplementation::Analytical
+                ? "analytical" : "numerical"},
+        {"connector_attempts", diagnostics.connector_attempts},
+        {"accepted_connector_attempts", diagnostics.accepted_connector_attempts},
+        {"planning_time_ms", diagnostics.planning_time_ms},
+        {"solution_accepted", diagnostics.solution_accepted},
+        {"invalid_configuration", diagnostics.invalid_configuration},
+        {"selected_path_length_m", diagnostics.selected_path_length_m},
+        {"selected_segment_count", diagnostics.selected_segment_count},
+        {"selected_waypoint_count", diagnostics.selected_waypoint_count},
+        {"selected_path_family", diagnostics.selected_path_family},
+    };
+    if (!invoked) return result;
+    if (diagnostics.implementation == ReedsSheppImplementation::Numerical) {
+        const parking_adas::NumericalConnectorCounters& n = diagnostics.numerical;
+        result["numerical"] = {
+            {"combinations_attempted", n.combinations_attempted},
+            {"solver_failures", n.solver_failures},
+            {"solver_converged", n.solver_converged},
+            {"initial_direction_rejections", n.initial_direction_rejections},
+            {"cost_pruned_candidates", n.cost_pruned_candidates},
+            {"candidates_sampled", n.candidates_sampled},
+            {"pose_collision_rejections", n.pose_collision_rejections},
+            {"goal_rejections", n.goal_rejections},
+            {"invalid_candidate_rejections", n.invalid_candidate_rejections},
+            {"deadline_rejections", n.deadline_rejections},
+            {"accepted_candidates", n.accepted_candidates},
+            {"initial_pose_collision_observations", n.initial_pose_collision_observations},
+        };
+    } else {
+        const parking_adas::AnalyticalConnectorCounters& a = diagnostics.analytical;
+        result["analytical"] = {
+            {"geometric_candidates_generated", a.geometric_candidates_generated},
+            {"candidates_examined", a.candidates_examined},
+            {"initial_pose_collision_rejections", a.initial_pose_collision_rejections},
+            {"initial_direction_rejections", a.initial_direction_rejections},
+            {"swept_collision_rejections", a.swept_collision_rejections},
+            {"goal_rejections", a.goal_rejections},
+            {"invalid_candidate_rejections", a.invalid_candidate_rejections},
+            {"deadline_rejections", a.deadline_rejections},
+            {"accepted_candidates", a.accepted_candidates},
+        };
+    }
+    return result;
+}
+
 void require_message_type(const Json& request, const std::string& expected) {
     const std::string actual = required_string_field(request, "type", "request");
     if (actual != expected) {
@@ -207,6 +260,8 @@ std::string ready_response(
             {"time_limited", diagnostics.time_limited},
             {"solution_found", diagnostics.solution_found},
             {"partial_plan", diagnostics.partial_plan},
+            {"reeds_shepp_connector",
+                connector_diagnostics_json(diagnostics.reeds_shepp_connector)},
         }},
     }.dump();
 }

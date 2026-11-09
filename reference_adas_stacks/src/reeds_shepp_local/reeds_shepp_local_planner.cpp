@@ -22,7 +22,8 @@ std::vector<Waypoint> ReedsSheppLocalPlanner::plan(const PlanRequest& input_requ
     const auto deadline = started + std::chrono::milliseconds(3000);
     const bool connected = connector.connect(
         {request.start_x, request.start_y, request.start_heading}, request.goal,
-        request.start_direction, context, deadline, connection);
+        request.start_direction, context, deadline, connection,
+        &diagnostics_.reeds_shepp_connector);
 
     diagnostics_.goal_connection_attempts = 1;
     diagnostics_.planning_time_ms = std::chrono::duration<double, std::milli>(
