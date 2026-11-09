@@ -9,3 +9,5 @@ describes one boundary and links to the others where they meet.
 - [Simulation bridge](SIM_BRIDGE_ARCHITECTURE.md): local C++ TCP/JSON adapter.
 - [Simulator](SIMULATOR_ARCHITECTURE.md): Python scenarios, physics, scoring,
   experiments, and rendering.
+- [ADAS parking benchmark](ADAS_PARKING_BENCHMARK.md): reproducible planner
+  comparisons, metrics, and output artifacts.

@@ -3,7 +3,9 @@
 #include <iostream>
 #include <string>
 #include <system_error>
+#include <vector>
 
+#include "parking_adas/planning/path_planner.hpp"
 #include "parking_adas/stack/parking_adas_stack.hpp"
 #include "sim_bridge/cli.hpp"
 #include "sim_bridge/protocol/simulator_protocol.hpp"
@@ -68,13 +70,30 @@ int run_tcp_client(int argc, char** argv) {
     return 0;
 }
 
+int run_plan_once(int argc, char** argv) {
+    std::string request_json;
+    if (!std::getline(std::cin, request_json)) {
+        throw std::invalid_argument("planner-only mode expects one reset JSON line on stdin");
+    }
+
+    const std::string planner_id = arg_value(argc, argv, "--path-planner", "hybrid_astar");
+    std::unique_ptr<parking_adas::PathPlanner> planner =
+        parking_adas::make_path_planner(planner_id);
+    const parking_adas::PlanRequest request = parse_reset_request(request_json);
+    const std::vector<parking_adas::Waypoint> path = planner->plan(request);
+    std::cout << ready_response(path, planner->diagnostics()) << '\n';
+    return 0;
+}
+
 }  // namespace sim_bridge
 
 int main(int argc, char** argv) {
     try {
+        if (sim_bridge::has_arg(argc, argv, "--plan-once")) {
+            return sim_bridge::run_plan_once(argc, argv);
+        }
         if (!sim_bridge::has_arg(argc, argv, "--tcp-client")) {
-            std::cerr << "tcp_json_sim_bridge only supports TCP mode. "
-                      << "Use --tcp-client --host <host> --port <port>.\n";
+            std::cerr << "Choose --tcp-client or --plan-once mode.\n";
             return 2;
         }
         return sim_bridge::run_tcp_client(argc, argv);

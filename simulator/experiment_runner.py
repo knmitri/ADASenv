@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from contextlib import ExitStack
 import json
+import math
 from pathlib import Path
 import socket
 import subprocess
@@ -13,6 +14,7 @@ from typing import Any
 
 import numpy as np
 
+from simulator.benchmark_metrics import measure_path, path_points_from_response
 from simulator.adas_stack_catalog import (
     DEFAULT_ADAS_STACK_CATALOG,
     AdasStackSpec,
@@ -95,6 +97,20 @@ def to_jsonable(value: Any) -> Any:
     return value
 
 
+def _strict_jsonable(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _strict_jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_strict_jsonable(item) for item in value]
+    if hasattr(value, "tolist"):
+        return _strict_jsonable(value.tolist())
+    if hasattr(value, "item"):
+        return _strict_jsonable(value.item())
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return value
+
+
 class ExperimentTraceLogger:
     """Write compact, replay-friendly simulator/ADAS exchange traces."""
 
@@ -131,14 +147,49 @@ def vehicle_as_dict(vehicle: AudiA5) -> dict[str, float]:
 
 
 def path_from_response(response: dict[str, Any]) -> list[tuple[float, float]]:
-    raw_path = response.get("planned_path", response.get("path", []))
-    path: list[tuple[float, float]] = []
-    for point in raw_path:
-        if isinstance(point, dict):
-            path.append((float(point["x"]), float(point["y"])))
-        else:
-            path.append((float(point[0]), float(point[1])))
-    return path
+    return [(point["x"], point["y"]) for point in path_points_from_response(response)]
+
+
+def reset_payload_for_simulation(
+    config: dict[str, Any],
+    scenario: ParkingScenario,
+    vehicle: AudiA5,
+    sim: ParkingSimulationEnvironment,
+    state: dict[str, Any],
+) -> dict[str, Any]:
+    """Build the unchanged reset request shared by TCP and direct-planner runs."""
+    goal_pose = sim.get_goal_pose()
+    return {
+        "type": "reset",
+        "protocol_version": PROTOCOL_VERSION,
+        "scenario_id": scenario.scenario_id,
+        "goal_slot_index": scenario.goal_slot_index,
+        "scenario": scenario.as_dict(),
+        "slots": scenario_slots_as_dict(scenario),
+        "goal_pose": goal_pose,
+        "goal": goal_pose,
+        "goal_slot": slot_as_dict(scenario.goal_slot_index, scenario.goal_slot),
+        "start": tuple(state["position"]),
+        "start_heading": float(state["heading"]),
+        "initial_state": state,
+        "static_obstacles": [
+            obstacle
+            for obstacle in sim.get_static_obstacles()
+            if not obstacle.get("boundary_wall", False)
+        ],
+        "vehicle": vehicle_as_dict(vehicle),
+        "simulation": {
+            "dt": float(config["simulation"]["dt"]),
+            "max_episode_steps": int(config["simulation"]["max_episode_steps"]),
+            "world_min_x": float(sim.world_min_x),
+            "world_min_y": float(sim.world_min_y),
+            "world_max_x": float(scenario.lot.lot_width),
+            "world_max_y": float(scenario.lot.lot_length),
+            "replan_position_threshold": 0.5,
+            "replan_heading_threshold": 0.35,
+            "goal_heading_tolerance": float(config["simulation"]["goal_heading_tolerance"]),
+        },
+    }
 
 
 def run_remote_slot(
@@ -196,54 +247,28 @@ def _run_remote_slot(
         cleanup.callback(visualizer.close)
     simulator_controller = SimulatorController.from_vehicle(vehicle)
     goal_pose = sim.get_goal_pose()
-
-    reset_payload = {
-        "type": "reset",
-        "protocol_version": PROTOCOL_VERSION,
-        "scenario_id": scenario.scenario_id,
-        "goal_slot_index": scenario.goal_slot_index,
-        "scenario": scenario.as_dict(),
-        "slots": scenario_slots_as_dict(scenario),
-        "goal_pose": goal_pose,
-        "goal": goal_pose,
-        "goal_slot": slot_as_dict(scenario.goal_slot_index, scenario.goal_slot),
-        "start": tuple(state["position"]),
-        "start_heading": float(state["heading"]),
-        "initial_state": state,
-        "static_obstacles": [
-            obstacle
-            for obstacle in sim.get_static_obstacles()
-            if not obstacle.get("boundary_wall", False)
-        ],
-        "vehicle": vehicle_as_dict(vehicle),
-        "simulation": {
-            "dt": float(config["simulation"]["dt"]),
-            "max_episode_steps": int(config["simulation"]["max_episode_steps"]),
-            "world_min_x": float(sim.world_min_x),
-            "world_min_y": float(sim.world_min_y),
-            "world_max_x": float(scenario.lot.lot_width),
-            "world_max_y": float(scenario.lot.lot_length),
-            "replan_position_threshold": 0.5,
-            "replan_heading_threshold": 0.35,
-            "goal_heading_tolerance": float(config["simulation"]["goal_heading_tolerance"]),
-        },
-    }
+    reset_payload = reset_payload_for_simulation(config, scenario, vehicle, sim, state)
     trace = ExperimentTraceLogger(trace_dir, scenario) if trace_dir is not None else None
     if trace is not None:
         cleanup.callback(trace.close)
 
-    plan_start = time.perf_counter()
+    episode_start = time.perf_counter()
+    plan_start = episode_start
     connection.send(reset_payload)
     ready = connection.receive()
     if ready.get("type") not in {"ready", "ack"}:
         raise RuntimeError(f"Expected ready response after reset, got {ready}")
     sim.planned_path = path_from_response(ready)
+    initial_path_points = path_points_from_response(ready)
+    final_path_points = initial_path_points
+    planning_diagnostics = ready.get("planning_diagnostics", {})
     if trace is not None:
         trace.write("reset", request=reset_payload, response=ready)
     plan_seconds = time.perf_counter() - plan_start
 
     info: dict[str, Any] = {}
     total_steps = 0
+    simulation_step_seconds = 0.0
     path_signature = None
     while True:
         if live_render and visualizer is not None and total_steps % render_every == 0:
@@ -272,6 +297,7 @@ def _run_remote_slot(
             raise RuntimeError(f"Expected command response, got {response}")
         if "planned_path" in response or "path" in response:
             sim.planned_path = path_from_response(response)
+            final_path_points = path_points_from_response(response)
             new_signature = (
                 len(sim.planned_path),
                 sim.planned_path[0] if sim.planned_path else None,
@@ -296,7 +322,9 @@ def _run_remote_slot(
                 flush=True,
             )
 
+        simulation_step_start = time.perf_counter()
         state, info = sim.step(acceleration, steering)
+        simulation_step_seconds += time.perf_counter() - simulation_step_start
         if trace is not None:
             trace_response = {
                 key: value
@@ -340,12 +368,16 @@ def _run_remote_slot(
         if visualizer.fig is not None:
             visualizer.fig.savefig(render_path, dpi=150)
 
+    episode_duration_seconds = time.perf_counter() - episode_start
+    simulated_duration_seconds = total_steps * float(config["simulation"]["dt"])
     final_position = state["position"]
     final_heading = float(state["heading"])
 
     goal_reached = bool(info.get("goal_reached", False))
     collision_occurred = bool(info.get("collision_occurred", False))
     stuck = bool(info.get("stuck", False))
+    initial_path_metrics = measure_path(initial_path_points, sim)
+    final_path_metrics = measure_path(final_path_points, sim)
     result = {
         "slot": scenario.goal_slot_index,
         "success": goal_reached and not collision_occurred,
@@ -353,13 +385,37 @@ def _run_remote_slot(
         "steps": total_steps,
         "path_len": len(sim.planned_path),
         "plan_seconds": plan_seconds,
+        "initial_planning_latency_ms": planning_diagnostics.get("planning_time_ms"),
+        "initial_planning_diagnostics": planning_diagnostics,
+        "episode_duration_seconds": episode_duration_seconds,
+        "episode_wall_clock_seconds": episode_duration_seconds,
+        "wall_clock_execution_seconds": episode_duration_seconds,
+        "simulated_duration_seconds": simulated_duration_seconds,
+        "simulation_speed_factor": (
+            simulated_duration_seconds / episode_duration_seconds
+            if episode_duration_seconds > 0 else None
+        ),
+        "simulation_step_time_seconds": (
+            simulation_step_seconds / total_steps if total_steps else None
+        ),
         "position_error": float(info.get("position_error", np.nan)),
+        "final_position_error_m": float(info.get("position_error", np.nan)),
         "heading_error_deg": float(np.rad2deg(abs(info.get("heading_error", np.nan)))),
+        "final_heading_error_deg": float(np.rad2deg(abs(info.get("heading_error", np.nan)))),
         "collision_occurred": collision_occurred,
         "stuck": stuck,
+        "timed_out": bool(stuck and not goal_reached),
         "final_x": float(final_position[0]),
         "final_y": float(final_position[1]),
         "final_heading_deg": float(np.rad2deg(final_heading)),
+        **initial_path_metrics,
+        "initial_plan_valid": bool(
+            planning_diagnostics.get("solution_found", False)
+            and initial_path_metrics["path_valid"]
+        ),
+        "initial_planned_path": initial_path_points,
+        "final_commanded_path_metrics": final_path_metrics,
+        "final_commanded_path": final_path_points,
         "render_path": str(render_path) if render_path is not None else "",
     }
     if trace is not None:
@@ -418,6 +474,8 @@ def _run_experiment(
     scenario_paths = [path.resolve() for path in selected_artifacts]
     base_scenarios = [load_parking_scenario(path) for path in scenario_paths]
     vehicle_for_fit = AudiA5()
+    process_spawn_seconds = None
+    launch_started = None
     with socket.create_server((args.host, args.port), reuse_port=False) as server:
         actual_host, actual_port = server.getsockname()[:2]
         connect_host = args.connect_host or args.host
@@ -427,17 +485,23 @@ def _run_experiment(
         print(f"Listening for ADAS stack on {actual_host}:{actual_port}", flush=True)
         if not args.wait_for_external_stack:
             stack = get_adas_stack(args.adas_stack, args.adas_stack_catalog)
+            launch_started = time.perf_counter()
             process_holder[0] = launch_adas_stack(stack, connect_host, int(actual_port))
+            process_spawn_seconds = time.perf_counter() - launch_started
 
         server.settimeout(args.accept_timeout)
         client_socket, address = server.accept()
         socket_holder[0] = client_socket
+        stack_launch_to_connection_seconds = (
+            time.perf_counter() - launch_started if launch_started is not None else None
+        )
 
     connection = None
     try:
         print(f"ADAS stack connected from {address[0]}:{address[1]}", flush=True)
         client_socket.settimeout(args.socket_timeout)
         connection = JsonLineConnection(client_socket)
+        handshake_started = time.perf_counter()
         connection.send(
             {
                 "type": "hello",
@@ -450,6 +514,7 @@ def _run_experiment(
             }
         )
         hello = connection.receive()
+        handshake_seconds = time.perf_counter() - handshake_started
         if hello.get("type") not in {"hello", "ack"}:
             raise RuntimeError(f"Expected hello response, got {hello}")
 
@@ -498,7 +563,19 @@ def _run_experiment(
                     trace_dir=args.trace_dir,
                 )
                 result["scenario_id"] = base_scenario.scenario_id
+                result["process_spawn_seconds"] = process_spawn_seconds
+                result["stack_launch_to_connection_seconds"] = (
+                    stack_launch_to_connection_seconds
+                )
+                result["handshake_seconds"] = handshake_seconds
                 results.append(result)
+                result_json = getattr(args, "result_json", None)
+                if result_json is not None:
+                    result_json.parent.mkdir(parents=True, exist_ok=True)
+                    result_json.write_text(
+                        json.dumps(_strict_jsonable(result), indent=2, allow_nan=False) + "\n",
+                        encoding="utf-8",
+                    )
                 status = (
                     "PASS" if result["success"]
                     else "STUCK" if result["stuck"]
@@ -610,6 +687,12 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=None,
         help="Write JSONL state, command, trajectory, and result traces for each scenario slot.",
+    )
+    parser.add_argument(
+        "--result-json",
+        type=Path,
+        default=None,
+        help="Write the completed single-slot result as JSON.",
     )
     return parser.parse_args()
 
