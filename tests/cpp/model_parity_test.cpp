@@ -4,8 +4,8 @@
 #include "parking_adas/common/math.hpp"
 
 int main() {
+    constexpr double test_wheelbase = 2.82;
     for (const double steering_angle : {-0.6, -0.22, 0.0, 0.22, 0.6}) {
-        constexpr double test_wheelbase = 2.82;
         const double expected_curvature = std::tan(steering_angle) / test_wheelbase;
         const double actual_curvature =
             parking_adas::curvature_from_steering_angle(
@@ -14,6 +14,25 @@ int main() {
             throw std::runtime_error(
                 "shared steering-to-curvature conversion changed its convention");
         }
+    }
+    const double positive_curvature =
+        parking_adas::curvature_from_steering_angle(0.22, test_wheelbase);
+    const double negative_curvature =
+        parking_adas::curvature_from_steering_angle(-0.22, test_wheelbase);
+    if (!(positive_curvature > 0.0 && negative_curvature < 0.0)) {
+        throw std::runtime_error("steering sign does not match curvature sign");
+    }
+
+    const parking_adas::Pose origin{};
+    const parking_adas::Pose forward_left =
+        parking_adas::integrate_pose_by_distance(
+            origin, 0.22, 0.1, test_wheelbase, 0.1);
+    const parking_adas::Pose reverse_left =
+        parking_adas::integrate_pose_by_distance(
+            origin, 0.22, -0.1, test_wheelbase, 0.1);
+    if (!(forward_left.yaw > 0.0 && reverse_left.yaw < 0.0)) {
+        throw std::runtime_error(
+            "reverse travel did not reverse the yaw response for the same steering angle");
     }
 
     const parking_adas::Pose initial{1.25, -0.75, 0.4};

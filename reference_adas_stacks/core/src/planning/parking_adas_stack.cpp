@@ -18,8 +18,8 @@ ParkingAdasStack::ParkingAdasStack(
     std::unique_ptr<TrajectoryTracker> trajectory_tracker,
     std::unique_ptr<TrajectoryGenerator> trajectory_generator,
     std::unique_ptr<TrajectoryOptimizer> trajectory_optimizer)
-    : planner_(std::move(planner)),
-      trajectory_tracker_(std::move(trajectory_tracker)),
+    : trajectory_tracker_(std::move(trajectory_tracker)),
+      planner_(std::move(planner)),
       trajectory_generator_(std::move(trajectory_generator)),
       trajectory_optimizer_(std::move(trajectory_optimizer)) {
     if (!planner_ || !trajectory_tracker_ || !trajectory_generator_ || !trajectory_optimizer_) {

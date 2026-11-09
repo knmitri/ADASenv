@@ -1,11 +1,13 @@
 #include "parking_adas/hybrid_astar/hybrid_a_star.hpp"
 
-#include <cmath>
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <functional>
 #include <queue>
 #include <unordered_map>
+#include <vector>
 
 #include "parking_adas/common/math.hpp"
 #include "parking_adas/planning/collision_checker.hpp"

@@ -230,8 +230,8 @@ bool ReedsSheppConnector::connect_numerical(
     const std::chrono::steady_clock::time_point& deadline,
     std::vector<Waypoint>& result) const {
     const PlanRequest& request = context.request();
-    const double max_curvature = std::tan(request.vehicle.max_steering_angle) /
-        request.vehicle.wheelbase;
+    const double max_curvature = curvature_from_steering_angle(
+        request.vehicle.max_steering_angle, request.vehicle.wheelbase);
     if (max_curvature <= 1e-9) return false;
 
     Candidate best;
