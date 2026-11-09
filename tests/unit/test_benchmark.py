@@ -11,6 +11,7 @@ import numpy as np
 
 from simulator.benchmark import (
     PLANNERS,
+    _write_plots,
     _cmake_build_options,
     _executable_metadata,
     _release_executable,
@@ -194,6 +195,177 @@ def test_aggregation_weights_trials_and_preserves_missing_metrics():
     assert overall["planning_latency_median_ms"] == pytest.approx(20.0)
     assert overall["planning_latency_max_ms"] == pytest.approx(30.0)
     assert overall["path_length_count"] == 2
+
+
+def test_planner_only_aggregation_distinguishes_invalid_plans_from_missing_metrics():
+    rows = aggregate_trials([
+        {
+            "planner_id": "hybrid_astar",
+            "scenario_id": "scene",
+            "benchmark_mode": "planner-only",
+            "is_warmup": False,
+            "valid_plan": False,
+            "path_collision": None,
+            "path_valid": None,
+            "timed_out": True,
+            "planner_only_latency_ms": None,
+            "initial_planning_latency_ms": None,
+            "path_length_m": None,
+        },
+        {
+            "planner_id": "hybrid_astar",
+            "scenario_id": "scene",
+            "benchmark_mode": "planner-only",
+            "is_warmup": True,
+            "valid_plan": True,
+            "path_collision": False,
+            "path_valid": True,
+            "timed_out": False,
+            "planner_only_latency_ms": 1.0,
+            "initial_planning_latency_ms": 1.0,
+            "path_length_m": 1.0,
+        },
+    ])
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["trial_count"] == 1
+    assert row["valid_plan_observation_count"] == 1
+    assert row["valid_plan_count"] == 0
+    assert row["valid_plan_rate"] == 0.0
+    assert row["failure_count"] == 1
+    assert row["failure_rate"] == 1.0
+    assert row["collision_observation_count"] == 0
+    assert row["path_collision_rate"] is None
+    assert row["path_valid_observation_count"] == 0
+    assert row["path_valid_rate"] is None
+    assert row["timeout_rate"] == 1.0
+    assert row["planning_latency_count"] == 0
+    assert row["planning_latency_median_ms"] is None
+    assert row["path_length_count"] == 0
+    assert row["path_length_median"] is None
+
+
+def test_closed_loop_aggregation_uses_known_outcomes_and_missing_metric_counts():
+    row = aggregate_trials([
+        {
+            "planner_id": "hybrid_astar",
+            "scenario_id": "scene",
+            "benchmark_mode": "accelerated-closed-loop",
+            "success": False,
+            "collision_occurred": True,
+            "stuck": None,
+            "timed_out": False,
+            "initial_planning_latency_ms": None,
+            "path_length_m": None,
+        },
+        {
+            "planner_id": "hybrid_astar",
+            "scenario_id": "scene",
+            "benchmark_mode": "accelerated-closed-loop",
+            "success": False,
+            "collision_occurred": None,
+            "stuck": True,
+            "timed_out": True,
+            "initial_planning_latency_ms": None,
+            "path_length_m": None,
+        },
+    ])[0]
+    assert row["parking_success_rate"] == 0.0
+    assert row["failure_count"] == 2
+    assert row["failure_rate"] == 1.0
+    assert row["collision_observation_count"] == 1
+    assert row["collision_rate"] == 1.0
+    assert row["stuck_observation_count"] == 1
+    assert row["stuck_rate"] == 1.0
+    assert row["timeout_rate"] == 0.5
+    assert row["planning_latency_count"] == 0
+    assert row["planning_latency_median_ms"] is None
+    assert row["path_length_count"] == 0
+    assert row["path_length_median"] is None
+
+
+@pytest.mark.parametrize(
+    ("mode", "field", "title", "filename", "unrelated_filename"),
+    [
+        (
+            "planner-only",
+            "valid_plan_rate",
+            "Valid plan rate",
+            "valid_plan_rate.png",
+            "parking_success_rate.png",
+        ),
+        (
+            "accelerated-closed-loop",
+            "parking_success_rate",
+            "Parking success rate",
+            "parking_success_rate.png",
+            "valid_plan_rate.png",
+        ),
+    ],
+)
+def test_plots_are_mode_aware_and_keep_missing_values_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    field: str,
+    title: str,
+    filename: str,
+    unrelated_filename: str,
+):
+    import matplotlib.pyplot as pyplot
+
+    captured = {"titles": [], "bars": []}
+
+    class _Axis:
+        def bar(self, _positions, heights, _width, label):
+            captured["bars"].append((label, heights))
+
+        def set_title(self, value):
+            captured["titles"].append(value)
+
+        def set_ylabel(self, _value):
+            pass
+
+        def set_ylim(self, *_args):
+            pass
+
+        def set_xticks(self, *_args, **_kwargs):
+            pass
+
+        def legend(self):
+            pass
+
+    class _Figure:
+        def tight_layout(self):
+            pass
+
+        def savefig(self, path, dpi):
+            Path(path).write_bytes(b"plot")
+
+    monkeypatch.setattr(
+        pyplot, "subplots", lambda **_kwargs: (_Figure(), _Axis())
+    )
+    monkeypatch.setattr(pyplot, "close", lambda _figure: None)
+    _write_plots(
+        tmp_path,
+        [{
+            "planner_id": "hybrid_astar",
+            "scenario_id": "scene",
+            field: None,
+            "planning_latency_median_ms": None,
+            "path_length_median": None,
+        }],
+        mode,
+    )
+    assert (tmp_path / filename).read_bytes() == b"plot"
+    assert not (tmp_path / unrelated_filename).exists()
+    assert title in captured["titles"]
+    assert "Median planning latency (ms)" in captured["titles"]
+    assert "Median initial path length (m)" in captured["titles"]
+    assert all(
+        all(np.isnan(height) for height in heights)
+        for _, heights in captured["bars"]
+    )
 
 
 def test_trial_schedule_repeats_and_alternates_planner_order():
@@ -564,6 +736,7 @@ def test_planner_only_report_uses_valid_plan_not_parking_success_terms(tmp_path:
     )
     content = report.read_text(encoding="utf-8")
     assert "Valid plan rate" in content
+    assert "Planner timeout rate" in content
     assert "Parking success rate" not in content
     assert "100.000%" in content
     assert "not a continuous swept-path certification" in content

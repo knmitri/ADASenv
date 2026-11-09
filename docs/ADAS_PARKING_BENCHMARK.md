@@ -97,7 +97,9 @@ Each run contains:
   effectiveness rates and available latency/path/episode statistics.
 - `benchmark_report.md`: concise comparison and metric limitations.
 - `logs\*.log`: runner output per trial.
-- Optional `success_rate.png`, `planning_latency.png`, and `path_length.png`.
+- Optional mode-specific `valid_plan_rate.png` (planner-only) or
+  `parking_success_rate.png` (closed-loop), plus `planning_latency.png` and
+  `path_length.png`.
 
 ## Interpreting metrics
 
@@ -120,9 +122,10 @@ Each run contains:
   goal slot and heading tolerance. It is discrete waypoint validation, not a
   continuous swept-path guarantee. Initial-plan and final-commanded-path
   validity are reported separately.
-- **Success, collision, stuck, timeout, and failure rates** use all measured
-  trials as denominators. Failed/timed-out trials remain in outputs. A missing
-  measurement is left blank and does not enter the statistic for that metric.
+- **Success, collision, stuck, timeout, and failure rates** use trials with a
+  recorded outcome for that metric; aggregate CSVs include corresponding
+  observation counts. Failed/timed-out trials remain in outputs. A missing
+  measurement is left blank and does not enter that metric's statistic.
   Aggregate success is calculated from counts, not from unweighted scenario
   percentages.
 - Latencies are sensitive to host load and thermal state. Compare planners on

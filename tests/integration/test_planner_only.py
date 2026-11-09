@@ -36,12 +36,14 @@ def test_release_planner_only_integration(planner_id: str) -> None:
 
     request, sim = build_plan_request(SCENARIO, max_steps=200)
     try:
+        assert request["type"] == "reset"
+        serialized_request = json.dumps(
+            to_jsonable(request), separators=(",", ":"), allow_nan=False
+        )
         try:
             completed = subprocess.run(
                 [str(executable), "--plan-once", "--path-planner", planner_id],
-                input=json.dumps(
-                    to_jsonable(request), separators=(",", ":"), allow_nan=False
-                ) + "\n",
+                input=serialized_request + "\n",
                 capture_output=True,
                 text=True,
                 check=False,
@@ -63,10 +65,11 @@ def test_release_planner_only_integration(planner_id: str) -> None:
         assert parsed_path == path
         path_metrics = measure_path(parsed_path, sim)
         assert path_metrics["path_waypoint_count"] == len(parsed_path)
-        if parsed_path and all("heading" in point for point in parsed_path):
+        if parsed_path:
+            assert diagnostics["solution_found"] or diagnostics["partial_plan"]
+            assert all("heading" in point for point in parsed_path)
             assert isinstance(path_metrics["path_collision"], (bool, np.bool_))
             assert isinstance(path_metrics["path_valid"], (bool, np.bool_))
-        if parsed_path:
             assert path_metrics["path_length_m"] is not None
         else:
             assert diagnostics["solution_found"] is False

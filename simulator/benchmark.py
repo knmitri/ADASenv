@@ -411,8 +411,8 @@ def execute_trial(
         else _trial_status(result)
     )
     result.setdefault("success", False)
-    result.setdefault("collision_occurred", False)
-    result.setdefault("stuck", False)
+    result.setdefault("collision_occurred", None)
+    result.setdefault("stuck", None)
     result.setdefault("timed_out", result["trial_status"] == "timeout")
     result["episode_wall_clock_seconds"] = result.get(
         "episode_wall_clock_seconds", result.get("episode_duration_seconds")
@@ -551,7 +551,7 @@ def execute_planner_only_trial(
             "path_length_m": None,
             "path_waypoint_count": None,
             "path_direction_changes": None,
-            "path_valid": False,
+            "path_valid": None,
             "path_collision": None,
             "initial_plan_valid": False,
             "valid_plan": False,
@@ -607,6 +607,7 @@ def _report_aggregate_rows(
     planner_only = mode == "planner-only"
     planner_only_only = {
         "success_count",
+        "success_observation_count",
         "collision_count",
         "collision_rate",
         "stuck_count",
@@ -626,6 +627,7 @@ def _report_aggregate_rows(
     closed_loop_only = {
         "valid_plan_count",
         "valid_plan_rate",
+        "valid_plan_observation_count",
         "planning_success_rate",
         "path_collision_rate",
         "planner_only_latency_count",
@@ -645,10 +647,19 @@ def _report_aggregate_rows(
                 result.pop(key, None)
             result["valid_plan_rate"] = row["valid_plan_rate"]
             result["path_collision_count"] = row["collision_count"]
+            result["path_collision_observation_count"] = row[
+                "collision_observation_count"
+            ]
             result["path_collision_rate"] = row["path_collision_rate"]
             result["planner_timeout_count"] = row["timeout_count"]
+            result["planner_timeout_observation_count"] = row[
+                "timeout_observation_count"
+            ]
             result["planner_timeout_rate"] = row["timeout_rate"]
             result["planning_failure_count"] = row["failure_count"]
+            result["planning_failure_observation_count"] = row[
+                "valid_plan_observation_count"
+            ]
             result["planning_failure_rate"] = row["failure_rate"]
             result.pop("failure_count", None)
             result.pop("failure_rate", None)
@@ -656,6 +667,12 @@ def _report_aggregate_rows(
             for key in closed_loop_only:
                 result.pop(key, None)
             result["parking_success_rate"] = row["parking_success_rate"]
+            result["parking_success_count"] = row["success_count"]
+            result["parking_success_observation_count"] = row[
+                "success_observation_count"
+            ]
+            result.pop("success_count", None)
+            result.pop("success_observation_count", None)
         mapped.append(result)
     return mapped
 
@@ -668,7 +685,12 @@ def generate_report(
 ) -> Path:
     planner_only = metadata["mode"] == "planner-only"
     outcome_columns = (
-        ("Valid plan rate", "Path collision rate", "Planning failure rate")
+        (
+            "Valid plan rate",
+            "Path collision rate",
+            "Planner timeout rate",
+            "Planning failure rate",
+        )
         if planner_only
         else ("Parking success rate", "Collision rate", "Stuck rate", "Timeout rate", "Failure rate")
     )
@@ -683,7 +705,7 @@ def generate_report(
             f"Median {metadata['latency_label']} (ms)", "P95 plan (ms)", "Max plan (ms)",
             "Mean +/- SD (ms)", "Median path (m)", "Median simulated (s)",
             "Median episode wall (s)", "Speed factor", "Median steps",
-            "Position error (m)", "Heading error (deg)",
+            "Position error (m)", "Heading error (deg)", "Initial path valid rate",
         )
     )
     scenario_headings = ("Scenario", "Planner", "Trials") + planner_headings
@@ -691,17 +713,18 @@ def generate_report(
     table_divider = "|" + "|".join("---:" for _ in range(2 + len(planner_headings))) + "|"
     if planner_only:
         outcome_values = lambda row: (
-            f"{_fmt(row['valid_plan_rate'] * 100 if row['valid_plan_rate'] is not None else None)}%",
-            f"{_fmt(row['path_collision_rate'] * 100 if row['path_collision_rate'] is not None else None)}%",
-            f"{_fmt(row['planning_failure_rate'] * 100 if row['planning_failure_rate'] is not None else None)}%",
+            _fmt_rate(row["valid_plan_rate"]),
+            _fmt_rate(row["path_collision_rate"]),
+            _fmt_rate(row["planner_timeout_rate"]),
+            _fmt_rate(row["planning_failure_rate"]),
         )
     else:
         outcome_values = lambda row: (
-            f"{_fmt(row['parking_success_rate'] * 100 if row['parking_success_rate'] is not None else None)}%",
-            f"{_fmt(row['collision_rate'] * 100)}%",
-            f"{_fmt(row['stuck_rate'] * 100)}%",
-            f"{_fmt(row['timeout_rate'] * 100)}%",
-            f"{_fmt(row['failure_rate'] * 100)}%",
+            _fmt_rate(row["parking_success_rate"]),
+            _fmt_rate(row["collision_rate"]),
+            _fmt_rate(row["stuck_rate"]),
+            _fmt_rate(row["timeout_rate"]),
+            _fmt_rate(row["failure_rate"]),
         )
 
     def metric_values(row: dict[str, Any]) -> tuple[str, ...]:
@@ -717,7 +740,7 @@ def generate_report(
             return common + (
                 _fmt(row["path_waypoint_count_median"]),
                 _fmt(row["path_direction_changes_median"]),
-                f"{_fmt(row['path_valid_rate'] * 100 if row['path_valid_rate'] is not None else None)}%",
+                _fmt_rate(row["path_valid_rate"]),
             )
         return common + (
             _fmt(row["simulated_duration_median_seconds"]),
@@ -726,6 +749,7 @@ def generate_report(
             _fmt(row["episode_steps_median"]),
             _fmt(row["final_position_error_median"]),
             _fmt(row["final_heading_error_deg_median"]),
+            _fmt_rate(row["path_valid_rate"]),
         )
 
     lines = [
@@ -777,7 +801,7 @@ def generate_report(
             else "- Closed-loop initial-plan and final-commanded-path validity check reported waypoints using the simulator's vehicle footprint, static obstacle, boundary, goal-slot, and heading rules. This is discrete waypoint validation, not continuous swept-path certification."
         ),
         "- Simulation step time is measured only around the Python `sim.step()` call. It does not include TCP and command handling.",
-        "- Failure trials are retained. Missing measurements remain blank and are not imputed; each aggregate reports the number of available planning-latency/path-length samples.",
+        "- Failure trials are retained. Missing measurements remain blank and are not imputed. Outcome rates use only trials with a recorded outcome; aggregate CSVs include observation counts so missing outcomes are visible. Latency and path statistics likewise report available-sample counts.",
         "- The built-in scenario artifacts are deterministic and disable random spawning. Planner order alternates by scenario and trial; warm-ups are recorded but excluded from aggregates.",
         (
             "- Planner-only mode directly invokes the selected planner using the same serialized reset/PlanRequest fields as closed-loop mode. It bypasses TCP, tracking, and vehicle simulation, so episode duration and speed factor are not applicable."
@@ -794,6 +818,10 @@ def generate_report(
 
 def _fmt(value: Any) -> str:
     return "n/a" if value is None or not math.isfinite(float(value)) else f"{float(value):.3f}"
+
+
+def _fmt_rate(value: Any) -> str:
+    return f"{_fmt(value * 100 if value is not None else None)}%"
 
 
 def _create_catalog(path: Path, executable: Path) -> None:
@@ -962,17 +990,32 @@ def run_benchmark(args: argparse.Namespace) -> Path:
     _write_csv(output_dir / "planner_aggregates.csv", planner_aggregates, aggregate_fields)
     generate_report(output_dir, metadata, scenario_aggregates, planner_aggregates)
     if args.plots:
-        _write_plots(output_dir, scenario_aggregates)
+        _write_plots(output_dir, scenario_aggregates, args.mode)
     print(f"Benchmark artifacts: {output_dir}")
     return output_dir
 
 
-def _write_plots(output_dir: Path, aggregates: list[dict[str, Any]]) -> None:
+def _write_plots(
+    output_dir: Path,
+    aggregates: list[dict[str, Any]],
+    mode: str,
+) -> None:
     import matplotlib.pyplot as plt
 
+    if mode == "planner-only":
+        outcome_plot = ("valid_plan_rate", "Valid plan rate", "valid_plan_rate.png")
+    elif mode == "accelerated-closed-loop":
+        outcome_plot = (
+            "parking_success_rate",
+            "Parking success rate",
+            "parking_success_rate.png",
+        )
+    else:
+        raise ValueError(f"Unsupported benchmark mode for plotting: {mode}")
+
     metrics = (
-        ("success_rate", "Success rate", "success_rate.png"),
-        ("planning_latency_median_ms", "Median initial planning latency (ms)", "planning_latency.png"),
+        outcome_plot,
+        ("planning_latency_median_ms", "Median planning latency (ms)", "planning_latency.png"),
         ("path_length_median", "Median initial path length (m)", "path_length.png"),
     )
     scenario_ids = sorted({row["scenario_id"] for row in aggregates})
@@ -987,9 +1030,7 @@ def _write_plots(output_dir: Path, aggregates: list[dict[str, Any]]) -> None:
                      if row["planner_id"] == planner and row["scenario_id"] == scenario_id),
                     None,
                 )
-                values.append(
-                    match.get(field) if match is not None else None
-                )
+                values.append(match.get(field) if match is not None else None)
             positions = [index + planner_index * width for index in range(len(scenario_ids))]
             axis.bar(
                 positions,
@@ -998,6 +1039,13 @@ def _write_plots(output_dir: Path, aggregates: list[dict[str, Any]]) -> None:
                 label=planner,
             )
         axis.set_title(title)
+        if field in {"valid_plan_rate", "parking_success_rate"}:
+            axis.set_ylabel("Rate")
+            axis.set_ylim(0, 1)
+        elif field == "planning_latency_median_ms":
+            axis.set_ylabel("Milliseconds")
+        else:
+            axis.set_ylabel("Metres")
         axis.set_xticks(
             [index + width * (len(PLANNERS) - 1) / 2 for index in range(len(scenario_ids))],
             scenario_ids,
